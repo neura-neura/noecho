@@ -1,0 +1,18 @@
+[package]
+name = "tech-probe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Phase 1 technical probe for NoEcho audio exclusion"
+
+[[bin]]
+name = "tech-probe"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+audio-core = { path = "../audio-core" }
+clap = { version = "4", features = ["derive"] }
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

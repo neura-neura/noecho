@@ -1,0 +1,55 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "NoEcho",
+  "version": "0.1.0",
+  "identifier": "com.noecho.app",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "NoEcho",
+        "width": 480,
+        "height": 560,
+        "resizable": false,
+        "fullscreen": false,
+        "decorations": true,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": null
+    },
+    "trayIcon": {
+      "iconPath": "icons/icon.png",
+      "iconAsTemplate": false,
+      "tooltip": "NoEcho"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "resources": [
+      "../installer/payload/*"
+    ],
+    "icon": [
+      "icons/icon.ico",
+      "icons/icon.png"
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "displayLanguageSelector": false
+      }
+    },
+    "longDescription": "NoEcho excluye aplicaciones del audio capturado por escritorio remoto, manteniéndolas audibles localmente.",
+    "shortDescription": "Audio privado para escritorio remoto",
+    "category": "Utility",
+    "copyright": "MIT"
+  },
+  "plugins": {}
+}

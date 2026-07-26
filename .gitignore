@@ -1,0 +1,25 @@
+# Rust
+/target/
+**/target/
+
+# Node
+/node_modules/
+/dist/
+/dist-installer/
+*.tsbuildinfo
+
+# Logs / local build
+*.log
+tauri-build*
+build-log.txt
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.pdb
+# Keep installer/payload binaries for personal distribution
+!installer/payload/*.exe
+!installer/payload/*.zip
+
