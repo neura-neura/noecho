@@ -5,7 +5,7 @@ use crate::grouping::{group_sessions, AppAudioGroup};
 use crate::loopback::{plan_shared_capture, SharedMonitor};
 use crate::persist::{IncompleteSession, LastProtectionInfo, StateStore};
 use crate::policy::{
-    clear_app_default_endpoint, set_process_default_endpoint,
+    clear_app_default_endpoint, set_process_default_endpoint, set_process_default_endpoints,
 };
 use crate::process::{expand_related_pids, is_critical_system_process, process_image_path};
 use crate::sessions::{AudioSessionInfo, SessionService};
@@ -22,6 +22,8 @@ pub struct ProtectionSnapshot {
     pub previous_default_communications_id: Option<String>,
     pub physical_device_id: String,
     pub physical_device_name: String,
+    pub communications_device_id: String,
+    pub communications_device_name: String,
     pub shared_device_id: String,
     pub shared_device_name: String,
     pub excluded_apps: Vec<AppIdentity>,
@@ -169,6 +171,7 @@ impl ProtectionEngine {
                 &excluded,
                 &snap.shared_device_id,
                 &snap.physical_device_id,
+                &snap.communications_device_id,
             )?;
             if let Some(s) = inner.snapshot.as_mut() {
                 s.excluded_apps = excluded;
@@ -222,6 +225,15 @@ impl ProtectionEngine {
                 )
             })?;
 
+        // Preserve the pre-existing split between general audio and calls.
+        // If the communications default is not a physical output, fall back
+        // to the selected physical multimedia device.
+        let communications = previous_comm
+            .as_ref()
+            .filter(|d| d.is_physical_candidate && d.id != shared.id)
+            .unwrap_or(&physical)
+            .clone();
+
         if shared.id == physical.id {
             return Err(AudioError::message(
                 "Hay un problema de configuracion de audio. Prueba reiniciar NoEcho o elige otra salida en Avanzado.",
@@ -254,13 +266,17 @@ impl ProtectionEngine {
                 "No se pudo activar. No te preocupes: tu audio se dejo como estaba. {e}"
             )));
         }
-        let _ = set_default_endpoint(&shared.id, DefaultRole::Communications);
+        // Keep Windows' global communications output untouched. Calling apps
+        // such as Telegram use this role, and replacing it with the shared
+        // cable can feed remote-session audio back into the local headset.
+        // Active processes are routed explicitly below, including that role.
 
         let route_result = apply_routes(
             &inner.session_service,
             &inner.config.excluded_apps,
             &shared.id,
             &physical.id,
+            &communications.id,
         );
 
         match route_result {
@@ -281,6 +297,8 @@ impl ProtectionEngine {
                     previous_default_communications_id: previous_comm.map(|d| d.id),
                     physical_device_id: physical.id.clone(),
                     physical_device_name: physical.name.clone(),
+                    communications_device_id: communications.id.clone(),
+                    communications_device_name: communications.name.clone(),
                     shared_device_id: shared.id.clone(),
                     shared_device_name: shared.name.clone(),
                     excluded_apps: inner.config.excluded_apps.clone(),
@@ -389,6 +407,7 @@ impl ProtectionEngine {
             &snap.excluded_apps,
             &snap.shared_device_id,
             &snap.physical_device_id,
+            &snap.communications_device_id,
         )?;
         Ok(())
     }
@@ -516,6 +535,7 @@ fn apply_routes(
     excluded_apps: &[AppIdentity],
     shared_device_id: &str,
     physical_device_id: &str,
+    communications_device_id: &str,
 ) -> Result<Vec<String>> {
     let list = sessions.list_sessions()?;
     let mut routed_paths = BTreeSet::new();
@@ -576,16 +596,19 @@ fn apply_routes(
             || excluded_names.contains(&exe)
             || excluded_apps.iter().any(|a| a.matches_path(&path));
 
-        let target = if is_private {
-            physical_device_id
-        } else {
-            shared_device_id
-        };
-
         // Route the concrete session PID through the exact Windows
         // AudioPolicyConfig method. The previous path-based implementation
         // guessed COM vtable slots and could terminate the selected app.
-        match set_process_default_endpoint(session.pid, target) {
+        let route_result = if is_private {
+            set_process_default_endpoints(
+                session.pid,
+                physical_device_id,
+                communications_device_id,
+            )
+        } else {
+            set_process_default_endpoint(session.pid, shared_device_id)
+        };
+        match route_result {
             Ok(()) => {
                 routed_paths.insert(path);
             }

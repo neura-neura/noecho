@@ -137,6 +137,17 @@ pub fn clear_app_default_endpoint(process_path: &str) -> Result<()> {
 /// the complete interface layout and one fixed, verified method slot. It never
 /// guesses vtable offsets.
 pub fn set_process_default_endpoint(pid: u32, device_id: &str) -> Result<()> {
+    set_process_default_endpoints(pid, device_id, device_id)
+}
+
+/// Assign Console/Multimedia and Communications independently. This preserves
+/// the common Windows setup where general audio uses speakers while calls use
+/// a headset.
+pub fn set_process_default_endpoints(
+    pid: u32,
+    multimedia_device_id: &str,
+    communications_device_id: &str,
+) -> Result<()> {
     let _com = crate::com::ComApartment::init_mta()?;
     if pid == 0 {
         return Err(AudioError::message("no se puede enrutar el proceso 0"));
@@ -153,12 +164,18 @@ pub fn set_process_default_endpoint(pid: u32, device_id: &str) -> Result<()> {
     const SET_PERSISTED_DEFAULT_ENDPOINT_SLOT: usize = 25;
 
     let class_name = HSTRING::from(CLASS_NAME);
-    let full_device_id = if device_id.is_empty() {
+    let full_multimedia_device_id = if multimedia_device_id.is_empty() {
         String::new()
     } else {
-        full_render_device_id(device_id)
+        full_render_device_id(multimedia_device_id)
     };
-    let device_name = HSTRING::from(full_device_id.as_str());
+    let full_communications_device_id = if communications_device_id.is_empty() {
+        String::new()
+    } else {
+        full_render_device_id(communications_device_id)
+    };
+    let multimedia_device_name = HSTRING::from(full_multimedia_device_id.as_str());
+    let communications_device_name = HSTRING::from(full_communications_device_id.as_str());
 
     unsafe {
         let factory: IInspectable = RoGetActivationFactory(&class_name)
@@ -183,21 +200,46 @@ pub fn set_process_default_endpoint(pid: u32, device_id: &str) -> Result<()> {
 
             // HSTRING is ABI-compatible with a pointer-sized value. The
             // HSTRING remains alive for the entire COM call.
-            let device_abi: *mut c_void = std::mem::transmute_copy(&device_name);
-            // Windows Sound settings persists both Console and Multimedia
-            // roles. Setting both keeps the app on the chosen endpoint even
-            // when it changes its session role.
-            let console_hr = function(ptr, pid as i32, eRender.0, eConsole.0, device_abi);
-            let multimedia_hr = function(ptr, pid as i32, eRender.0, eMultimedia.0, device_abi);
+            let multimedia_device_abi: *mut c_void =
+                std::mem::transmute_copy(&multimedia_device_name);
+            let communications_device_abi: *mut c_void =
+                std::mem::transmute_copy(&communications_device_name);
+            // Calls commonly open their render stream with the Communications
+            // role. Persist all three roles so a private calling app cannot
+            // fall back to the shared system endpoint and create a return path.
+            let console_hr = function(
+                ptr,
+                pid as i32,
+                eRender.0,
+                eConsole.0,
+                multimedia_device_abi,
+            );
+            let multimedia_hr = function(
+                ptr,
+                pid as i32,
+                eRender.0,
+                eMultimedia.0,
+                multimedia_device_abi,
+            );
+            let communications_hr = function(
+                ptr,
+                pid as i32,
+                eRender.0,
+                eCommunications.0,
+                communications_device_abi,
+            );
             release_raw(ptr);
 
-            if console_hr.is_ok() || multimedia_hr.is_ok() {
+            // A partial assignment is unsafe here: the app may select whichever
+            // role was not updated when it recreates its audio stream.
+            if console_hr.is_ok() && multimedia_hr.is_ok() && communications_hr.is_ok() {
                 return Ok(());
             }
             tracing::debug!(
-                "SetPersistedDefaultAudioEndpoint falló para pid={pid}, console=0x{:08X}, multimedia=0x{:08X}",
+                "SetPersistedDefaultAudioEndpoint falló para pid={pid}, console=0x{:08X}, multimedia=0x{:08X}, communications=0x{:08X}",
                 console_hr.0 as u32,
-                multimedia_hr.0 as u32
+                multimedia_hr.0 as u32,
+                communications_hr.0 as u32
             );
         }
     }
