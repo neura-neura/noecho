@@ -305,6 +305,31 @@ export default function App() {
         <div className="mt-2 rounded-md border px-3 py-2 text-xs leading-relaxed">{error || info}</div>
       )}
 
+      {!active && (
+        <div className="mt-3 space-y-1 rounded-lg border p-3">
+          <label className="text-xs font-medium">{tx("headphones")}</label>
+          <select
+            className="w-full rounded-md border bg-background px-2 py-1.5 text-xs"
+            value={config?.preferred_physical_device_id || ""}
+            onChange={(e) =>
+              void saveConfigPatch({ preferred_physical_device_id: e.target.value || null })
+            }
+          >
+            <option value="">{tx("automatic")}</option>
+            {devices
+              .filter((d) => d.is_physical_candidate)
+              .map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.name}
+                </option>
+              ))}
+          </select>
+          <p className="text-[11px] leading-relaxed text-muted-foreground">
+            {tx("headphonesHint")}
+          </p>
+        </div>
+      )}
+
       <div className="mt-3 grid grid-cols-1 gap-2">
         {!active ? (
           <Button onClick={onProtect} disabled={loading || selectedCount === 0 || needsSetup}>
@@ -345,26 +370,6 @@ export default function App() {
               <option value="en">English</option>
               <option value="es">Español</option>
               <option value="zh">中文</option>
-            </select>
-          </div>
-
-          <div className="space-y-1">
-            <label className="text-muted-foreground">{tx("headphones")}</label>
-            <select
-              className="w-full rounded-md border bg-background px-2 py-1.5"
-              value={config?.preferred_physical_device_id || ""}
-              onChange={(e) =>
-                void saveConfigPatch({ preferred_physical_device_id: e.target.value || null })
-              }
-            >
-              <option value="">{tx("automatic")}</option>
-              {devices
-                .filter((d) => d.is_physical_candidate)
-                .map((d) => (
-                  <option key={d.id} value={d.id}>
-                    {d.name}
-                  </option>
-                ))}
             </select>
           </div>
 

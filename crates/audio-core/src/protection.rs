@@ -207,12 +207,19 @@ impl ProtectionEngine {
             .find(|d| d.is_default_communications)
             .cloned();
 
+        // The shared-audio monitor always returns normal system sound to the
+        // output Windows was already using. Choosing a private output must not
+        // move the rest of the host computer's audio.
+        let local_monitor = inner.device_service.choose_physical(
+            previous_mm.as_ref().map(|d| d.id.as_str()),
+            true,
+        )?;
         let physical = inner.device_service.choose_physical(
             inner
                 .config
                 .preferred_physical_device_id
                 .as_deref()
-                .or(previous_mm.as_ref().map(|d| d.id.as_str())),
+                .or(Some(local_monitor.id.as_str())),
             true,
         )?;
 
@@ -225,14 +232,18 @@ impl ProtectionEngine {
                 )
             })?;
 
-        // Preserve the pre-existing split between general audio and calls.
-        // If the communications default is not a physical output, fall back
-        // to the selected physical multimedia device.
-        let communications = previous_comm
-            .as_ref()
-            .filter(|d| d.is_physical_candidate && d.id != shared.id)
-            .unwrap_or(&physical)
-            .clone();
+        // In automatic mode preserve the pre-existing split between general
+        // audio and calls. An explicit private-output choice applies to every
+        // role of the selected app, as requested by the user.
+        let communications = if inner.config.preferred_physical_device_id.is_some() {
+            physical.clone()
+        } else {
+            previous_comm
+                .as_ref()
+                .filter(|d| d.is_physical_candidate && d.id != shared.id)
+                .unwrap_or(&physical)
+                .clone()
+        };
 
         if shared.id == physical.id {
             return Err(AudioError::message(
@@ -266,10 +277,8 @@ impl ProtectionEngine {
                 "No se pudo activar. No te preocupes: tu audio se dejo como estaba. {e}"
             )));
         }
-        // Keep Windows' global communications output untouched. Calling apps
-        // such as Telegram use this role, and replacing it with the shared
-        // cable can feed remote-session audio back into the local headset.
-        // Active processes are routed explicitly below, including that role.
+        // Keep Windows' global communications output untouched. Selected apps
+        // are routed explicitly below, including that role.
 
         let route_result = apply_routes(
             &inner.session_service,
@@ -282,7 +291,10 @@ impl ProtectionEngine {
         match route_result {
             Ok(paths) => {
                 let mut warnings = Vec::new();
-                let monitor = match SharedMonitor::start(shared.id.clone(), physical.id.clone()) {
+                let monitor = match SharedMonitor::start(
+                    shared.id.clone(),
+                    local_monitor.id.clone(),
+                ) {
                     Ok(mon) => Some(mon),
                     Err(e) => {
                         warnings.push(format!(
