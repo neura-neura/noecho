@@ -20,6 +20,8 @@ pub struct IncompleteSession {
     pub physical_device_id: Option<String>,
     pub shared_device_id: Option<String>,
     pub excluded_apps: Vec<AppIdentity>,
+    #[serde(default)]
+    pub muted_feedback_sessions: Vec<String>,
     pub reason: String,
 }
 

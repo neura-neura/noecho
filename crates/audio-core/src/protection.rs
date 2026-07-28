@@ -28,6 +28,7 @@ pub struct ProtectionSnapshot {
     pub shared_device_name: String,
     pub excluded_apps: Vec<AppIdentity>,
     pub routed_app_paths: Vec<String>,
+    pub muted_feedback_sessions: Vec<String>,
     pub activated_at: String,
 }
 
@@ -258,6 +259,7 @@ impl ProtectionEngine {
             physical_device_id: Some(physical.id.clone()),
             shared_device_id: Some(shared.id.clone()),
             excluded_apps: inner.config.excluded_apps.clone(),
+            muted_feedback_sessions: Vec::new(),
             reason: "activation-in-progress".into(),
         };
         {
@@ -291,6 +293,18 @@ impl ProtectionEngine {
         match route_result {
             Ok(paths) => {
                 let mut warnings = Vec::new();
+                let muted_feedback_sessions = match mute_feedback_sessions(
+                    &inner.session_service,
+                    &shared.id,
+                ) {
+                    Ok(sessions) => sessions,
+                    Err(e) => {
+                        warnings.push(format!(
+                            "La proteccion se activo, pero no se pudo aislar el monitoreo local del microfono: {e}."
+                        ));
+                        Vec::new()
+                    }
+                };
                 let monitor = match SharedMonitor::start(
                     shared.id.clone(),
                     local_monitor.id.clone(),
@@ -315,6 +329,7 @@ impl ProtectionEngine {
                     shared_device_name: shared.name.clone(),
                     excluded_apps: inner.config.excluded_apps.clone(),
                     routed_app_paths: paths,
+                    muted_feedback_sessions: muted_feedback_sessions.clone(),
                     activated_at: chrono::Local::now().to_rfc3339(),
                 };
 
@@ -334,6 +349,7 @@ impl ProtectionEngine {
                     physical_device_id: Some(snapshot.physical_device_id.clone()),
                     shared_device_id: Some(snapshot.shared_device_id.clone()),
                     excluded_apps: snapshot.excluded_apps.clone(),
+                    muted_feedback_sessions,
                     reason: "protection-active".into(),
                 });
                 state.last_protection = Some(LastProtectionInfo {
@@ -378,6 +394,9 @@ impl ProtectionEngine {
         }
 
         if let Some(snapshot) = inner.snapshot.take() {
+            for session_id in &snapshot.muted_feedback_sessions {
+                let _ = inner.session_service.set_session_muted(session_id, false);
+            }
             for path in &snapshot.routed_app_paths {
                 let _ = clear_app_default_endpoint(path);
             }
@@ -406,7 +425,7 @@ impl ProtectionEngine {
     }
 
     pub fn refresh_routes(&self) -> Result<()> {
-        let inner = self.inner.lock();
+        let mut inner = self.inner.lock();
         if !inner.active {
             return Ok(());
         }
@@ -414,13 +433,28 @@ impl ProtectionEngine {
             .snapshot
             .as_ref()
             .ok_or(AudioError::ProtectionNotActive)?;
+        let excluded_apps = snap.excluded_apps.clone();
+        let shared_device_id = snap.shared_device_id.clone();
+        let physical_device_id = snap.physical_device_id.clone();
+        let communications_device_id = snap.communications_device_id.clone();
         apply_routes(
             &inner.session_service,
-            &snap.excluded_apps,
-            &snap.shared_device_id,
-            &snap.physical_device_id,
-            &snap.communications_device_id,
+            &excluded_apps,
+            &shared_device_id,
+            &physical_device_id,
+            &communications_device_id,
         )?;
+        let newly_muted = mute_feedback_sessions(&inner.session_service, &shared_device_id)?;
+        if !newly_muted.is_empty() {
+            if let Some(snapshot) = inner.snapshot.as_mut() {
+                for session_id in newly_muted {
+                    if !snapshot.muted_feedback_sessions.contains(&session_id) {
+                        snapshot.muted_feedback_sessions.push(session_id);
+                    }
+                }
+            }
+            persist_locked(&mut inner)?;
+        }
         Ok(())
     }
 
@@ -532,6 +566,7 @@ fn persist_locked(inner: &mut EngineInner) -> Result<()> {
             physical_device_id: Some(snapshot.physical_device_id.clone()),
             shared_device_id: Some(snapshot.shared_device_id.clone()),
             excluded_apps: snapshot.excluded_apps.clone(),
+            muted_feedback_sessions: snapshot.muted_feedback_sessions.clone(),
             reason: if inner.active {
                 "protection-active".into()
             } else {
@@ -673,6 +708,40 @@ fn is_microphone_chain_session(session: &AudioSessionInfo) -> bool {
         || device.contains("cable b")
 }
 
+fn is_microphone_monitor_process(session: &AudioSessionInfo) -> bool {
+    let exe = session
+        .exe_name
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    exe.contains("micvst") || exe.contains("mic-mix") || exe.contains("mic_mixer")
+}
+
+/// The local monitor mirrors the shared render endpoint to the user's normal
+/// speakers/headphones. A microphone-processing app that accidentally follows
+/// that endpoint after a display-device change would therefore create local
+/// sidetone. Mute only that accidental render session while protection is
+/// active; its capture/virtual-cable sessions are not touched.
+fn mute_feedback_sessions(
+    sessions: &SessionService,
+    shared_device_id: &str,
+) -> Result<Vec<String>> {
+    let list = sessions.list_sessions()?;
+    let mut muted = Vec::new();
+    for session in list {
+        if session.muted
+            || session.device_id.as_deref() != Some(shared_device_id)
+            || !is_microphone_monitor_process(&session)
+        {
+            continue;
+        }
+        if sessions.set_session_muted(&session.session_id, true)? {
+            muted.push(session.session_id);
+        }
+    }
+    Ok(muted)
+}
+
 fn restore_defaults(mm: Option<&str>, comm: Option<&str>) -> Result<()> {
     if let Some(id) = mm {
         set_default_endpoint(id, DefaultRole::Multimedia)?;
@@ -692,6 +761,10 @@ fn restore_defaults_from_incomplete(incomplete: &IncompleteSession) -> Result<()
         if let Some(path) = &app.exe_path {
             let _ = clear_app_default_endpoint(path);
         }
+    }
+    let sessions = SessionService::new();
+    for session_id in &incomplete.muted_feedback_sessions {
+        let _ = sessions.set_session_muted(session_id, false);
     }
     Ok(())
 }

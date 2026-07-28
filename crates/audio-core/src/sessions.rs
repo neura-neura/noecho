@@ -83,6 +83,54 @@ impl SessionService {
             Ok(sessions)
         }
     }
+
+    /// Change the mute state of one concrete render-session instance.
+    /// Returns true when the session still existed and was updated.
+    pub fn set_session_muted(&self, session_id: &str, muted: bool) -> Result<bool> {
+        let _com = crate::com::ComApartment::init_mta()?;
+        unsafe {
+            let enumerator: IMMDeviceEnumerator =
+                CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
+            let collection = enumerator.EnumAudioEndpoints(
+                eRender,
+                windows::Win32::Media::Audio::DEVICE_STATE_ACTIVE,
+            )?;
+
+            for i in 0..collection.GetCount()? {
+                let device = collection.Item(i)?;
+                let manager: IAudioSessionManager2 =
+                    match device.Activate(CLSCTX_INPROC_SERVER, None) {
+                        Ok(manager) => manager,
+                        Err(_) => continue,
+                    };
+                let sessions = match manager.GetSessionEnumerator() {
+                    Ok(sessions) => sessions,
+                    Err(_) => continue,
+                };
+                for index in 0..sessions.GetCount()? {
+                    let control: IAudioSessionControl = match sessions.GetSession(index) {
+                        Ok(control) => control,
+                        Err(_) => continue,
+                    };
+                    let control2: IAudioSessionControl2 = match control.cast() {
+                        Ok(control) => control,
+                        Err(_) => continue,
+                    };
+                    let instance_id = control2
+                        .GetSessionInstanceIdentifier()
+                        .ok()
+                        .and_then(|value| value.to_string().ok());
+                    if instance_id.as_deref() != Some(session_id) {
+                        continue;
+                    }
+                    let volume: ISimpleAudioVolume = control.cast()?;
+                    volume.SetMute(muted, std::ptr::null())?;
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
 }
 
 impl Default for SessionService {

@@ -20,6 +20,11 @@ tauri-plugin-shell = "2"
 chrono.workspace = true
 dirs.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_UI_WindowsAndMessaging",
+] }
+
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]

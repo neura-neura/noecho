@@ -12,6 +12,12 @@ use tauri::{
 use tracing_subscriber::EnvFilter;
 
 fn main() {
+    // Acquire this before initializing audio or creating a second tray icon.
+    // If another process owns the mutex, restore its window and stop here.
+    let Some(_single_instance) = acquire_single_instance_or_restore() else {
+        return;
+    };
+
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .init();
@@ -55,7 +61,7 @@ fn main() {
                 &[&show_i, &activate_i, &deactivate_i, &restore_i, &quit_i],
             )?;
 
-            let _tray = TrayIconBuilder::new()
+            let _tray = TrayIconBuilder::with_id("main")
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
                 .tooltip("NoEcho\nSin exclusiones")
@@ -123,6 +129,59 @@ fn main() {
                 let _ = state.engine.deactivate();
             }
         });
+}
+
+#[cfg(windows)]
+struct SingleInstanceGuard {
+    _file: std::fs::File,
+}
+
+#[cfg(windows)]
+fn acquire_single_instance_or_restore() -> Option<SingleInstanceGuard> {
+    use std::fs::OpenOptions;
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE,
+    };
+
+    let lock_dir = dirs::data_local_dir()?.join("NoEcho");
+    if std::fs::create_dir_all(&lock_dir).is_err() {
+        // Starting is preferable to failing completely if the profile folder
+        // is temporarily unavailable.
+        return None;
+    }
+    let lock_path = lock_dir.join("instance.lock");
+    match OpenOptions::new()
+        .create(true)
+        .write(true)
+        // Deny read/write/delete sharing while this File remains alive.
+        .share_mode(0)
+        .open(lock_path)
+    {
+        Ok(file) => Some(SingleInstanceGuard { _file: file }),
+        Err(_) => {
+            let title: Vec<u16> = "NoEcho"
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+            let window = unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) };
+            if !window.is_null() {
+                unsafe {
+                    ShowWindow(window, SW_RESTORE);
+                    SetForegroundWindow(window);
+                }
+            }
+            None
+        }
+    }
+}
+
+#[cfg(not(windows))]
+struct SingleInstanceGuard;
+
+#[cfg(not(windows))]
+fn acquire_single_instance_or_restore() -> Option<SingleInstanceGuard> {
+    Some(SingleInstanceGuard)
 }
 
 fn update_tray_tooltip(app: &tauri::AppHandle) {
