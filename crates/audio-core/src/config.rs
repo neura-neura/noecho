@@ -27,6 +27,8 @@ pub struct AppConfig {
     pub excluded_apps: Vec<crate::types::AppIdentity>,
     pub language: String,
     pub language_migrated: bool,
+    pub microphone_to_remote: bool,
+    pub monitor: String,
 }
 
 impl Default for AppConfig {
@@ -46,6 +48,8 @@ impl Default for AppConfig {
             excluded_apps: Vec::new(),
             language: "en".into(),
             language_migrated: false,
+            microphone_to_remote: false,
+            monitor: "none".into(),
         }
     }
 }

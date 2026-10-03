@@ -1,19 +1,11 @@
-# Tu setup y NoEcho
+# Micrófono y escritorio remoto
 
-## Tu caso (esta PC)
-- Cable A: MicVST
-- Cable B: Mic Mix (micro final)
-- Cable normal Pack45: canal de NoEcho
+El micrófono de UnifiedAudio y la captura de Parsec son rutas distintas. Voice only, PC audio only y Both pertenecen al micrófono virtual.
 
-## Que hacer ahora que instalaste Pack45
-1. Abre NoEcho
-2. Marca Discord (u otra app privada)
-3. Pulsa Ocultar del remoto
-4. Cuando termines: Volver al audio normal
+La versión 0.2.6 mantiene CABLE Input en UnifiedAudio y utiliza Steam Streaming Speakers, ya instalado, como salida interna de la mezcla de NoEcho para Parsec. Las apps siguen saliendo por sus dispositivos habituales. No se usan Cable A/B ni se cambian los dispositivos predeterminados.
 
-No toques A, B, MicVST ni Mic Mix.
+Cierra Parsec, UnifiedAudio y NoEcho desde sus bandejas antes de instalar el paquete combinado. El instalador prepara la fuente de Parsec. Abre los tres programas y marca AyuGram en NoEcho. Usa el modo de UnifiedAudio que necesites para tu micrófono.
 
-## Otros usuarios
-No se les obliga a instalar Pack45.
-Si ya tienen su propio canal compartido, NoEcho puede usarlo.
-Si no tienen ninguno, pueden preparar uno o elegirlo en Opciones.
+Comprueba desde la otra PC que AyuGram no se oye por Parsec y que un programa permitido sí se oye. Desactivar conserva el sonido sin filtro. NoEcho debe seguir ejecutándose para entregar la mezcla remota.
+
+Consulta el [README](../README.md) para requisitos, escucha, control remoto y cómo volver a la captura original de Parsec.

@@ -1,21 +1,17 @@
-use crate::config::AppConfig;
-use crate::devices::{set_default_endpoint, AudioDevice, DefaultRole, DeviceService};
-use crate::error::{AudioError, Result};
-use crate::grouping::{group_sessions, AppAudioGroup};
-use crate::loopback::{plan_shared_capture, SharedMonitor};
-use crate::persist::{IncompleteSession, LastProtectionInfo, StateStore};
-use crate::policy::{
-    clear_app_default_endpoint, set_process_default_endpoint, set_process_default_endpoints,
+use crate::{
+    config::AppConfig,
+    devices::{set_default_endpoint, AudioDevice, DefaultRole, DeviceService},
+    error::{AudioError, Result},
+    grouping::{group_sessions, AppAudioGroup},
+    mixer::{MixSettings, MixTelemetry, ProcessMixer},
+    persist::{IncompleteSession, StateStore},
+    policy::clear_app_default_endpoint,
+    sessions::{AudioSessionInfo, SessionService},
+    types::{AppIdentity, ProtectionMode},
 };
-use crate::process::{expand_related_pids, is_critical_system_process, process_image_path};
-use crate::sessions::{AudioSessionInfo, SessionService};
-use crate::types::{AppIdentity, ProtectionMode};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
 use std::sync::Arc;
-use tracing::{info, warn};
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProtectionSnapshot {
     pub previous_default_multimedia_id: Option<String>,
@@ -44,738 +40,407 @@ pub struct ProtectionStatus {
     pub shared_device_available: bool,
     pub warnings: Vec<String>,
     pub snapshot: Option<ProtectionSnapshot>,
+    pub process_capture_supported: bool,
+    pub processor: Option<crate::processor::ProcessorRoute>,
+    pub remote_capture_ready: bool,
+    pub remote_backend: String,
 }
 
 pub struct ProtectionEngine {
     inner: Mutex<EngineInner>,
 }
-
 struct EngineInner {
     config: AppConfig,
     store: StateStore,
-    device_service: DeviceService,
-    session_service: SessionService,
-    active: bool,
-    snapshot: Option<ProtectionSnapshot>,
-    monitor: Option<SharedMonitor>,
+    mixer: Option<ProcessMixer>,
+    unified: Option<crate::unified::UnifiedStage>,
+    shared_name: Option<String>,
     warnings: Vec<String>,
+    enabled: bool,
+    managed_remote: bool,
 }
-
 impl ProtectionEngine {
     pub fn initialize() -> Result<Self> {
         let store = StateStore::open_default()?;
-        let mut state = store.load().unwrap_or_default();
+        let mut state = store.load()?;
         let mut warnings = Vec::new();
-
-        // Older builds used Spanish as the implicit language and had no language
-        // selector. Migrate that one-time default, while preserving any choice
-        // made after the selector has been used.
-        if !state.config.language_migrated {
-            if state.config.language == "es" {
-                state.config.language = "en".into();
-            }
-            state.config.language_migrated = true;
-            let _ = store.save(&state);
+        if let Some(incomplete) = &state.incomplete_session {
+            restore_legacy(incomplete)?;
+            warnings.push("Se restauró la configuración de la versión anterior.".into());
+            state.incomplete_session = None;
+            store.save(&state)?;
         }
-
-        if state.config.auto_recover_on_start {
-            if let Some(incomplete) = state.incomplete_session.clone() {
-                warn!("sesion incompleta detectada; restaurando audio");
-                if let Err(e) = restore_defaults_from_incomplete(&incomplete) {
-                    warnings.push(format!(
-                        "No se pudo restaurar completamente la sesion anterior: {e}"
-                    ));
-                } else {
-                    warnings.push(
-                        "Se detecto un cierre inesperado. La configuracion de audio fue restaurada."
-                            .into(),
-                    );
-                }
-                state.incomplete_session = None;
-                let _ = store.save(&state);
-            }
-        }
-
-        Ok(Self {
+        state.config.monitor = "none".into();
+        let engine=Self {
             inner: Mutex::new(EngineInner {
                 config: state.config,
                 store,
-                device_service: DeviceService::new(),
-                session_service: SessionService::new(),
-                active: false,
-                snapshot: None,
-                monitor: None,
+                mixer: None,
+                unified: None,
+                shared_name: None,
                 warnings,
+                enabled: false,
+                managed_remote: false,
             }),
-        })
+        };
+        if let Ok(d)=crate::parsec::remote_device(){
+            if crate::parsec::ready(&d.id){
+                let mut inner=engine.inner.lock();
+                if !channel_available(&d,&SessionService::new().list_capture_sessions()?){
+                    inner.warnings.push("La salida interna de Parsec está ocupada por otra aplicación.".into());
+                    drop(inner);return Ok(engine);
+                }
+                inner.config.preferred_shared_device_id=Some(d.id.clone());
+                let mut pass=settings(&inner.config);pass.excluded.clear();
+                match ProcessMixer::start(d.id,pass){
+                    Ok(m)=>{inner.mixer=Some(m);inner.shared_name=Some(d.name);inner.managed_remote=true;}
+                    Err(e)=>inner.warnings.push(e.to_string()),
+                }
+            }
+        }
+        Ok(engine)
     }
-
     pub fn config(&self) -> AppConfig {
         self.inner.lock().config.clone()
     }
-
-    pub fn update_config(&self, config: AppConfig) -> Result<()> {
+    pub fn update_config(&self, mut config: AppConfig) -> Result<()> {
+        config.excluded_apps = sanitize(config.excluded_apps);
+        validate_config(&config)?;
         let mut inner = self.inner.lock();
+        if inner.managed_remote && config.preferred_shared_device_id != inner.config.preferred_shared_device_id {
+            return Err(AudioError::message("La salida interna de Parsec se configura automáticamente. No cambies el cable del micrófono."));
+        }
+        if config.microphone_to_remote && !inner.config.microphone_to_remote && crate::processor::read().is_ok(){
+            return Err(AudioError::message("UnifiedAudio ya entrega tu micrófono a la llamada. NoEcho no lo duplica en Parsec."));
+        }
+        if (inner.mixer.is_some() || inner.unified.is_some())
+            && config.preferred_shared_device_id != inner.config.preferred_shared_device_id
+        {
+            return Err(AudioError::message(
+                "Detén la mezcla antes de cambiar el canal remoto.",
+            ));
+        }
+        if let Some(m) = &inner.mixer {
+            let mut next=settings(&config);if !inner.enabled{next.excluded.clear();}m.update(next)?;
+        }
+        if let Some(u) = &inner.unified {
+            u.update(&config.excluded_apps)?;
+        }
+        persist(&inner.store, &config)?;
         inner.config = config;
-        persist_locked(&mut inner)?;
         Ok(())
     }
-
+    pub fn set_excluded_apps(&self, apps: Vec<AppIdentity>) -> Result<()> {
+        let mut inner = self.inner.lock();
+        let mut next = inner.config.clone();
+        next.excluded_apps = sanitize(apps);
+        if let Some(m) = &inner.mixer {
+            let mut mix=settings(&next);if !inner.enabled{mix.excluded.clear();}m.update(mix)?;
+        }
+        if let Some(u) = &inner.unified { u.update(&next.excluded_apps)?; }
+        persist(&inner.store, &next)?;
+        inner.config = next;
+        Ok(())
+    }
     pub fn list_devices(&self) -> Result<Vec<AudioDevice>> {
-        self.inner.lock().device_service.list_render_devices()
+        DeviceService::new().list_render_devices()
     }
-
     pub fn list_sessions(&self) -> Result<Vec<AudioSessionInfo>> {
-        self.inner.lock().session_service.list_sessions()
+        SessionService::new().list_sessions()
     }
-
     pub fn list_app_groups(&self) -> Result<Vec<AppAudioGroup>> {
-        let inner = self.inner.lock();
-        let sessions = inner.session_service.list_sessions()?;
-        let excluded = current_excluded(&inner);
-        let mut groups = group_sessions(&sessions, &excluded);
-        if !inner.config.show_inactive_recent {
-            groups.retain(|g| {
-                matches!(
-                    g.state,
-                    crate::types::PlaybackState::Active | crate::types::PlaybackState::Inactive
-                ) || g.excluded
+        let config = self.config();
+        let mut groups = group_sessions(&self.list_sessions()?, &config.excluded_apps);
+        for app in &config.excluded_apps {
+            if groups
+                .iter()
+                .any(|g| g.exe_name.eq_ignore_ascii_case(&app.exe_name))
+            {
+                continue;
+            }
+            groups.push(AppAudioGroup {
+                id: app.exe_name.clone(),
+                identity: app.clone(),
+                display_name: app.display_name.clone().unwrap_or(app.exe_name.clone()),
+                exe_name: app.exe_name.clone(),
+                exe_path: app.exe_path.clone(),
+                icon_data_url: None,
+                state: crate::types::PlaybackState::Inactive,
+                session_count: 0,
+                pids: vec![],
+                excluded: true,
+                is_system: false,
+                is_critical: false,
+                volume: 0.0,
+                device_names: vec![],
             });
         }
         Ok(groups)
     }
-
     pub fn status(&self) -> ProtectionStatus {
-        let inner = self.inner.lock();
-        status_from_inner(&inner)
+        status(&self.inner.lock())
     }
-
-    pub fn set_excluded_apps(&self, apps: Vec<AppIdentity>) -> Result<()> {
-        let mut filtered = Vec::new();
-        for app in apps {
-            if is_critical_system_process(&app.exe_name) {
-                continue;
-            }
-            filtered.push(app);
-        }
-        let mut inner = self.inner.lock();
-        inner.config.excluded_apps = filtered;
-        if inner.active {
-            let excluded = inner.config.excluded_apps.clone();
-            let snap = inner
-                .snapshot
-                .as_ref()
-                .ok_or(AudioError::ProtectionNotActive)?
-                .clone();
-            apply_routes(
-                &inner.session_service,
-                &excluded,
-                &snap.shared_device_id,
-                &snap.physical_device_id,
-                &snap.communications_device_id,
-            )?;
-            if let Some(s) = inner.snapshot.as_mut() {
-                s.excluded_apps = excluded;
-            }
-        }
-        persist_locked(&mut inner)?;
-        Ok(())
+    pub fn telemetry(&self) -> MixTelemetry {
+        let i = self.inner.lock();
+        combined_telemetry(&i)
     }
-
     pub fn activate(&self, selected: Option<Vec<AppIdentity>>) -> Result<ProtectionStatus> {
         let mut inner = self.inner.lock();
-        if inner.active {
-            return Err(AudioError::ProtectionAlreadyActive);
+        let mut config = inner.config.clone();
+        if let Some(apps) = selected {
+            config.excluded_apps = sanitize(apps);
         }
-
-        if let Some(selected) = selected {
-            inner.config.excluded_apps = selected
-                .into_iter()
-                .filter(|a| !is_critical_system_process(&a.exe_name))
-                .collect();
-        }
-
-        if inner.config.excluded_apps.is_empty() {
-            return Err(AudioError::message(
-                "Elige al menos una aplicacion de la lista y vuelve a intentarlo.",
-            ));
-        }
-
-        let devices = inner.device_service.list_render_devices()?;
-        let previous_mm = devices.iter().find(|d| d.is_default_multimedia).cloned();
-        let previous_comm = devices
-            .iter()
-            .find(|d| d.is_default_communications)
-            .cloned();
-
-        // The shared-audio monitor always returns normal system sound to the
-        // output Windows was already using. Choosing a private output must not
-        // move the rest of the host computer's audio.
-        let local_monitor = inner.device_service.choose_physical(
-            previous_mm.as_ref().map(|d| d.id.as_str()),
-            true,
-        )?;
-        let physical = inner.device_service.choose_physical(
-            inner
-                .config
-                .preferred_physical_device_id
-                .as_deref()
-                .or(Some(local_monitor.id.as_str())),
-            true,
-        )?;
-
-        let shared = inner
-            .device_service
-            .find_shared_candidate(inner.config.preferred_shared_device_id.as_deref())?
-            .ok_or_else(|| {
-                AudioError::SharedDeviceUnavailable(
-                    "Aun falta un paso de instalacion de audio. Abre NoEcho y sigue el aviso en pantalla: es algo que solo se hace una vez.".into(),
-                )
-            })?;
-
-        // In automatic mode preserve the pre-existing split between general
-        // audio and calls. An explicit private-output choice applies to every
-        // role of the selected app, as requested by the user.
-        let communications = if inner.config.preferred_physical_device_id.is_some() {
-            physical.clone()
-        } else {
-            previous_comm
-                .as_ref()
-                .filter(|d| d.is_physical_candidate && d.id != shared.id)
-                .unwrap_or(&physical)
-                .clone()
-        };
-
-        if shared.id == physical.id {
-            return Err(AudioError::message(
-                "Hay un problema de configuracion de audio. Prueba reiniciar NoEcho o elige otra salida en Avanzado.",
-            ));
-        }
-
-        let incomplete = IncompleteSession {
-            created_at: chrono::Local::now().to_rfc3339(),
-            previous_default_multimedia_id: previous_mm.as_ref().map(|d| d.id.clone()),
-            previous_default_communications_id: previous_comm.as_ref().map(|d| d.id.clone()),
-            physical_device_id: Some(physical.id.clone()),
-            shared_device_id: Some(shared.id.clone()),
-            excluded_apps: inner.config.excluded_apps.clone(),
-            muted_feedback_sessions: Vec::new(),
-            reason: "activation-in-progress".into(),
-        };
-        {
-            let mut state = inner.store.load().unwrap_or_default();
-            state.config = inner.config.clone();
-            state.incomplete_session = Some(incomplete);
-            inner.store.save(&state)?;
-        }
-
-        if let Err(e) = set_default_endpoint(&shared.id, DefaultRole::Multimedia) {
-            let _ = restore_defaults(
-                previous_mm.as_ref().map(|d| d.id.as_str()),
-                previous_comm.as_ref().map(|d| d.id.as_str()),
-            );
-            clear_incomplete(&inner.store);
-            return Err(AudioError::message(format!(
-                "No se pudo activar. No te preocupes: tu audio se dejo como estaba. {e}"
-            )));
-        }
-        // Keep Windows' global communications output untouched. Selected apps
-        // are routed explicitly below, including that role.
-
-        let route_result = apply_routes(
-            &inner.session_service,
-            &inner.config.excluded_apps,
-            &shared.id,
-            &physical.id,
-            &communications.id,
-        );
-
-        match route_result {
-            Ok(paths) => {
-                let mut warnings = Vec::new();
-                let muted_feedback_sessions = match mute_feedback_sessions(
-                    &inner.session_service,
-                    &shared.id,
-                ) {
-                    Ok(sessions) => sessions,
-                    Err(e) => {
-                        warnings.push(format!(
-                            "La proteccion se activo, pero no se pudo aislar el monitoreo local del microfono: {e}."
-                        ));
-                        Vec::new()
-                    }
-                };
-                let monitor = match SharedMonitor::start(
-                    shared.id.clone(),
-                    local_monitor.id.clone(),
-                ) {
-                    Ok(mon) => Some(mon),
-                    Err(e) => {
-                        warnings.push(format!(
-                            "La exclusion se aplico, pero el monitor local fallo: {e}."
-                        ));
-                        None
-                    }
-                };
-
-                let snapshot = ProtectionSnapshot {
-                    previous_default_multimedia_id: previous_mm.map(|d| d.id),
-                    previous_default_communications_id: previous_comm.map(|d| d.id),
-                    physical_device_id: physical.id.clone(),
-                    physical_device_name: physical.name.clone(),
-                    communications_device_id: communications.id.clone(),
-                    communications_device_name: communications.name.clone(),
-                    shared_device_id: shared.id.clone(),
-                    shared_device_name: shared.name.clone(),
-                    excluded_apps: inner.config.excluded_apps.clone(),
-                    routed_app_paths: paths,
-                    muted_feedback_sessions: muted_feedback_sessions.clone(),
-                    activated_at: chrono::Local::now().to_rfc3339(),
-                };
-
-                inner.monitor = monitor;
-                inner.snapshot = Some(snapshot.clone());
-                inner.active = true;
-                inner.warnings = warnings;
-
-                let mut state = inner.store.load().unwrap_or_default();
-                state.config = inner.config.clone();
-                state.incomplete_session = Some(IncompleteSession {
-                    created_at: snapshot.activated_at.clone(),
-                    previous_default_multimedia_id: snapshot.previous_default_multimedia_id.clone(),
-                    previous_default_communications_id: snapshot
-                        .previous_default_communications_id
-                        .clone(),
-                    physical_device_id: Some(snapshot.physical_device_id.clone()),
-                    shared_device_id: Some(snapshot.shared_device_id.clone()),
-                    excluded_apps: snapshot.excluded_apps.clone(),
-                    muted_feedback_sessions,
-                    reason: "protection-active".into(),
-                });
-                state.last_protection = Some(LastProtectionInfo {
-                    active: true,
-                    updated_at: chrono::Local::now().to_rfc3339(),
-                    excluded_apps: snapshot.excluded_apps.clone(),
-                    physical_device_id: Some(snapshot.physical_device_id.clone()),
-                    shared_device_id: Some(snapshot.shared_device_id.clone()),
-                });
-                inner.store.save(&state)?;
-                info!(
-                    "proteccion activa: {} apps privadas, shared={}, physical={}",
-                    snapshot.excluded_apps.len(),
-                    snapshot.shared_device_name,
-                    snapshot.physical_device_name
-                );
-            }
-            Err(e) => {
-                let _ = restore_defaults(
-                    previous_mm.as_ref().map(|d| d.id.as_str()),
-                    previous_comm.as_ref().map(|d| d.id.as_str()),
-                );
-                clear_incomplete(&inner.store);
-                return Err(AudioError::message(format!(
-                    "No se pudo activar. No te preocupes: tu audio se dejo como estaba. {e} Tu audio continua funcionando normalmente."
-                )));
-            }
-        }
-
-        Ok(status_from_inner(&inner))
-    }
-
-    pub fn deactivate(&self) -> Result<ProtectionStatus> {
-        let mut inner = self.inner.lock();
-        if !inner.active {
-            clear_incomplete(&inner.store);
-            return Ok(status_from_inner(&inner));
-        }
-
-        if let Some(mon) = inner.monitor.take() {
-            mon.stop();
-        }
-
-        if let Some(snapshot) = inner.snapshot.take() {
-            for session_id in &snapshot.muted_feedback_sessions {
-                let _ = inner.session_service.set_session_muted(session_id, false);
-            }
-            for path in &snapshot.routed_app_paths {
-                let _ = clear_app_default_endpoint(path);
-            }
-            let _ = restore_defaults(
-                snapshot.previous_default_multimedia_id.as_deref(),
-                snapshot.previous_default_communications_id.as_deref(),
-            );
-        }
-
-        inner.active = false;
-        inner.warnings.clear();
-        clear_incomplete(&inner.store);
-
-        let mut state = inner.store.load().unwrap_or_default();
-        state.config = inner.config.clone();
-        state.last_protection = Some(LastProtectionInfo {
-            active: false,
-            updated_at: chrono::Local::now().to_rfc3339(),
-            excluded_apps: inner.config.excluded_apps.clone(),
-            physical_device_id: inner.config.preferred_physical_device_id.clone(),
-            shared_device_id: inner.config.preferred_shared_device_id.clone(),
-        });
-        inner.store.save(&state)?;
-        info!("proteccion desactivada; audio restaurado");
-        Ok(status_from_inner(&inner))
-    }
-
-    pub fn refresh_routes(&self) -> Result<()> {
-        let mut inner = self.inner.lock();
-        if !inner.active {
-            return Ok(());
-        }
-        let snap = inner
-            .snapshot
-            .as_ref()
-            .ok_or(AudioError::ProtectionNotActive)?;
-        let excluded_apps = snap.excluded_apps.clone();
-        let shared_device_id = snap.shared_device_id.clone();
-        let physical_device_id = snap.physical_device_id.clone();
-        let communications_device_id = snap.communications_device_id.clone();
-        apply_routes(
-            &inner.session_service,
-            &excluded_apps,
-            &shared_device_id,
-            &physical_device_id,
-            &communications_device_id,
-        )?;
-        let newly_muted = mute_feedback_sessions(&inner.session_service, &shared_device_id)?;
-        if !newly_muted.is_empty() {
-            if let Some(snapshot) = inner.snapshot.as_mut() {
-                for session_id in newly_muted {
-                    if !snapshot.muted_feedback_sessions.contains(&session_id) {
-                        snapshot.muted_feedback_sessions.push(session_id);
-                    }
+        validate_config(&config)?;
+        let sessions = SessionService::new().list_capture_sessions()?;
+        let processor=crate::processor::detect(&sessions)?;
+        if crate::parsec::installed(){
+            let remote=crate::parsec::remote_device()?;
+            if !channel_available(&remote,&sessions){return Err(AudioError::message("La salida interna de Parsec está ocupada por otra aplicación. No se puede filtrar su audio de forma segura."));}
+            if !crate::parsec::ready(&remote.id){return Err(AudioError::message("Falta preparar Parsec. Cierra Parsec desde su bandeja y ejecuta el instalador nuevo; NoEcho configurará su captura sin cambiar tu micrófono."));}
+            if processor.is_some() {
+                if let Some(u)=&inner.unified{u.update(&config.excluded_apps)?;}
+                else{inner.unified=Some(crate::unified::UnifiedStage::start(&config.excluded_apps)?);}
+            }else{inner.unified=None;}
+            config.preferred_shared_device_id=Some(remote.id.clone());
+            if let Some(m)=&inner.mixer{m.update(settings(&config))?;}
+            else{
+                match ProcessMixer::start(remote.id,settings(&config)){
+                    Ok(m)=>inner.mixer=Some(m),Err(e)=>{inner.unified=None;return Err(e);}
                 }
             }
-            persist_locked(&mut inner)?;
+            persist(&inner.store, &config)?;
+            inner.config = config;
+            inner.shared_name = Some(remote.name);
+            inner.enabled=true;inner.managed_remote=true;
+            return Ok(status(&inner));
+        }
+        inner.unified = None;
+        if let Some(m) = &inner.mixer {
+            if m.telemetry().running {
+                m.update(settings(&config))?;
+                persist(&inner.store, &config)?;
+                inner.config = config;
+                inner.enabled=true;
+                return Ok(status(&inner));
+            }
+        }
+        inner.mixer = None;
+        let service = DeviceService::new();
+        let sessions = SessionService::new().list_capture_sessions()?;
+        let original = service.find_shared_candidate(config.preferred_shared_device_id.as_deref())?;
+        let shared = if config.preferred_shared_device_id.is_none() {
+            service.shared_candidates()?.into_iter().find(|d| channel_available(d, &sessions)).or(original).ok_or_else(|| AudioError::message("Falta un canal virtual para NoEcho. Prepara el audio desde Ayuda."))?
+        } else { original.ok_or_else(|| AudioError::message("El canal guardado no está disponible. Elige automáticamente en Ajustes."))? };
+        if shared.is_default_multimedia || shared.is_default_communications {
+            return Err(AudioError::message("El canal remoto es una salida predeterminada de Windows. Selecciona tus altavoces o auriculares en Windows; NoEcho conserva esa salida."));
+        }
+        let conflicts: Vec<_> = sessions.into_iter().filter(|s| {
+            s.device_id.as_deref() == Some(&shared.id)
+                && s.pid != std::process::id()
+                && s.pid != 0
+                && matches!(s.state, crate::types::PlaybackState::Active)
+        }).map(|s| s.display_name).collect();
+        if !conflicts.is_empty() {
+            return Err(AudioError::message(format!("El canal remoto está ocupado por: {}. Elige un cable libre en Ajustes; conserva la salida de las otras aplicaciones.", conflicts.join(", "))));
+        }
+        // Save the chosen channel so subsequent starts and the receiver's setup agree.
+        config.preferred_shared_device_id = Some(shared.id.clone());
+        let mixer = ProcessMixer::start(shared.id, settings(&config))?;
+        persist(&inner.store, &config)?;
+        inner.config = config;
+        inner.shared_name = Some(shared.name);
+        inner.mixer = Some(mixer);
+        inner.enabled=true;
+        Ok(status(&inner))
+    }
+    pub fn deactivate(&self) -> Result<ProtectionStatus> {
+        let mut inner = self.inner.lock();
+        if inner.managed_remote{
+            if let Some(m)=&inner.mixer{let mut pass=settings(&inner.config);pass.excluded.clear();pass.monitor="none".into();m.update(pass)?;}
+        }else{inner.mixer=None;inner.shared_name=None;}
+        inner.unified = None;
+        inner.enabled=false;
+        inner.config.monitor = "none".into();
+        persist(&inner.store, &inner.config)?;
+        Ok(status(&inner))
+    }
+    pub fn refresh_routes(&self) -> Result<()> {
+        let inner = self.inner.lock();
+        if let Some(m) = &inner.mixer {
+            m.update(settings(&inner.config))?;
         }
         Ok(())
     }
-
     pub fn capture_plan(&self) -> Result<crate::loopback::LoopbackCapturePlan> {
         let inner = self.inner.lock();
-        let mut pids = BTreeSet::new();
-        let apps = current_excluded(&inner);
-        let sessions = inner.session_service.list_sessions()?;
-        for app in &apps {
-            let seed: Vec<u32> = sessions
-                .iter()
-                .filter(|s| {
-                    s.exe_name
-                        .as_ref()
-                        .map(|n| n.eq_ignore_ascii_case(&app.exe_name))
-                        .unwrap_or(false)
-                })
-                .map(|s| s.pid)
-                .collect();
-            for pid in expand_related_pids(&seed, Some(&app.exe_name)).unwrap_or(seed) {
-                pids.insert(pid);
-            }
-        }
-        Ok(plan_shared_capture(&pids.into_iter().collect::<Vec<_>>()))
-    }
-
-    pub fn take_warnings(&self) -> Vec<String> {
-        let mut inner = self.inner.lock();
-        std::mem::take(&mut inner.warnings)
-    }
-}
-
-impl Drop for ProtectionEngine {
-    fn drop(&mut self) {
-        let _ = self.deactivate();
-    }
-}
-
-pub type SharedEngine = Arc<ProtectionEngine>;
-
-pub fn shared_engine() -> Result<SharedEngine> {
-    Ok(Arc::new(ProtectionEngine::initialize()?))
-}
-
-fn current_excluded(inner: &EngineInner) -> Vec<AppIdentity> {
-    if inner.active {
-        inner
-            .snapshot
-            .as_ref()
-            .map(|s| s.excluded_apps.clone())
-            .unwrap_or_else(|| inner.config.excluded_apps.clone())
-    } else {
-        inner.config.excluded_apps.clone()
-    }
-}
-
-fn status_from_inner(inner: &EngineInner) -> ProtectionStatus {
-    let shared = inner
-        .device_service
-        .find_shared_candidate(inner.config.preferred_shared_device_id.as_deref())
-        .ok()
-        .flatten();
-    let excluded = current_excluded(inner);
-    let message = if inner.active {
-        if excluded.is_empty() {
-            "Protecci?n activa".into()
-        } else if excluded.len() == 1 {
-            let name = excluded[0]
-                .display_name
-                .clone()
-                .unwrap_or_else(|| excluded[0].exe_name.clone());
-            format!("{name} solo se oye en esta computadora.")
-        } else {
-            format!(
-                "{} aplicaciones solo se oyen en esta computadora.",
-                excluded.len()
-            )
-        }
-    } else {
-        "Listo para proteger".into()
-    };
-
-    ProtectionStatus {
-        active: inner.active,
-        mode: inner.config.mode,
-        message,
-        excluded_count: excluded.len(),
-        excluded_apps: excluded,
-        physical_device_name: inner.snapshot.as_ref().map(|s| s.physical_device_name.clone()),
-        shared_device_name: inner
-            .snapshot
-            .as_ref()
-            .map(|s| s.shared_device_name.clone())
-            .or_else(|| shared.as_ref().map(|d| d.name.clone())),
-        shared_device_available: shared.is_some(),
-        warnings: inner.warnings.clone(),
-        snapshot: inner.snapshot.clone(),
-    }
-}
-
-fn persist_locked(inner: &mut EngineInner) -> Result<()> {
-    let mut state = inner.store.load().unwrap_or_default();
-    state.config = inner.config.clone();
-    if let Some(snapshot) = &inner.snapshot {
-        state.incomplete_session = Some(IncompleteSession {
-            created_at: snapshot.activated_at.clone(),
-            previous_default_multimedia_id: snapshot.previous_default_multimedia_id.clone(),
-            previous_default_communications_id: snapshot.previous_default_communications_id.clone(),
-            physical_device_id: Some(snapshot.physical_device_id.clone()),
-            shared_device_id: Some(snapshot.shared_device_id.clone()),
-            excluded_apps: snapshot.excluded_apps.clone(),
-            muted_feedback_sessions: snapshot.muted_feedback_sessions.clone(),
-            reason: if inner.active {
-                "protection-active".into()
-            } else {
-                "idle".into()
-            },
-        });
-    }
-    inner.store.save(&state)
-}
-
-fn apply_routes(
-    sessions: &SessionService,
-    excluded_apps: &[AppIdentity],
-    shared_device_id: &str,
-    physical_device_id: &str,
-    communications_device_id: &str,
-) -> Result<Vec<String>> {
-    let list = sessions.list_sessions()?;
-    let mut routed_paths = BTreeSet::new();
-    let mut private_route_failures = Vec::new();
-    let excluded_names: BTreeSet<String> = excluded_apps
-        .iter()
-        .map(|a| a.exe_name.to_ascii_lowercase())
-        .collect();
-
-    let mut private_pids = BTreeSet::new();
-    for app in excluded_apps {
-        let seed: Vec<u32> = list
+        let sessions = SessionService::new().list_sessions()?;
+        let pids: Vec<_> = sessions
             .iter()
             .filter(|s| {
-                s.exe_name
-                    .as_ref()
-                    .map(|n| n.eq_ignore_ascii_case(&app.exe_name))
-                    .unwrap_or(false)
+                s.exe_name.as_ref().is_some_and(|n| {
+                    inner
+                        .config
+                        .excluded_apps
+                        .iter()
+                        .any(|a| a.exe_name.eq_ignore_ascii_case(n))
+                })
             })
             .map(|s| s.pid)
             .collect();
-        for pid in expand_related_pids(&seed, Some(&app.exe_name)).unwrap_or(seed) {
-            private_pids.insert(pid);
-        }
+        Ok(crate::loopback::plan_shared_capture(&pids))
     }
-
-    for session in &list {
-        if session.is_system_sounds || session.pid == 0 {
-            continue;
-        }
-        if is_microphone_chain_session(session) {
-            // Do not redirect MicVST/Mic Mix or anything already using the
-            // user's Cable A/B microphone chain.
-            tracing::debug!(
-                "se omite cadena de microfono: exe={:?}, device={:?}",
-                session.exe_name,
-                session.device_name
-            );
-            continue;
-        }
-        let Some(path) = session
-            .exe_path
-            .clone()
-            .or_else(|| process_image_path(session.pid))
-        else {
-            continue;
-        };
-        let exe = session
-            .exe_name
-            .clone()
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        if is_critical_system_process(&exe) {
-            continue;
-        }
-
-        let is_private = private_pids.contains(&session.pid)
-            || excluded_names.contains(&exe)
-            || excluded_apps.iter().any(|a| a.matches_path(&path));
-
-        // Route the concrete session PID through the exact Windows
-        // AudioPolicyConfig method. The previous path-based implementation
-        // guessed COM vtable slots and could terminate the selected app.
-        let route_result = if is_private {
-            set_process_default_endpoints(
-                session.pid,
-                physical_device_id,
-                communications_device_id,
-            )
-        } else {
-            set_process_default_endpoint(session.pid, shared_device_id)
-        };
-        match route_result {
-            Ok(()) => {
-                routed_paths.insert(path);
-            }
-            Err(e) => {
-                tracing::debug!("route path failed for {path}: {e}");
-                if is_private {
-                    private_route_failures.push(format!("{}: {e}", session.display_name));
-                }
-            }
-        }
+    pub fn take_warnings(&self) -> Vec<String> {
+        std::mem::take(&mut self.inner.lock().warnings)
     }
-
-    if !private_route_failures.is_empty() {
-        return Err(AudioError::message(format!(
-            "No se pudo separar de forma segura: {}",
-            private_route_failures.join(", ")
-        )));
+}
+impl Drop for ProtectionEngine {
+    fn drop(&mut self) {
+        self.inner.get_mut().mixer = None;
+        self.inner.get_mut().unified = None;
     }
-
-    for app in excluded_apps {
-        if let Some(path) = &app.exe_path {
-            // The active-session loop above normally handles this. For an app
-            // with no current session, leave it alone; it will be picked up by
-            // refresh_routes when Windows creates its audio session.
-            tracing::debug!("private app has no active session yet: {path}");
-        }
+}
+pub type SharedEngine = Arc<ProtectionEngine>;
+pub fn shared_engine() -> Result<SharedEngine> {
+    Ok(Arc::new(ProtectionEngine::initialize()?))
+}
+fn settings(c: &AppConfig) -> MixSettings {
+    MixSettings {
+        excluded: c.excluded_apps.clone(),
+        microphone_to_remote: c.microphone_to_remote && crate::processor::read().is_err(),
+        monitor: c.monitor.clone(),
+        processor_output: None,
+        processed_microphone: crate::processor::read().ok().map(|r|r.output_id),
     }
-
-    Ok(routed_paths.into_iter().collect())
+}
+fn channel_available(device: &AudioDevice, sessions: &[AudioSessionInfo]) -> bool {
+    !device.is_default_multimedia && !device.is_default_communications && !sessions.iter().any(|s|
+        s.device_id.as_deref() == Some(&device.id) && s.pid != 0 && s.pid != std::process::id()
+        && s.state == crate::types::PlaybackState::Active)
 }
 
-fn is_microphone_chain_session(session: &AudioSessionInfo) -> bool {
-    let exe = session
-        .exe_name
-        .as_deref()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if exe.contains("micvst") || exe.contains("mic-mix") || exe.contains("mic_mixer") {
-        return true;
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+    #[test]
+    fn occupied_and_default_channels_are_not_available() {
+        let mut device = AudioDevice {id:"cable".into(),name:"CABLE Input".into(),description:None,is_default_multimedia:false,is_default_communications:false,is_virtual_shared_candidate:true,is_physical_candidate:false,state:1};
+        let mut session = AudioSessionInfo {session_id:"s".into(),pid:123,display_name:"Busy".into(),exe_path:None,exe_name:None,icon_path:None,icon_data_url:None,state:crate::types::PlaybackState::Active,is_system_sounds:false,volume:1.0,muted:false,device_id:Some("cable".into()),device_name:None};
+        assert!(!channel_available(&device, &[session.clone()]));
+        session.muted = true;
+        assert!(!channel_available(&device, &[session.clone()]));
+        session.state = crate::types::PlaybackState::Inactive;
+        assert!(channel_available(&device, &[session.clone()]));
+        session.state = crate::types::PlaybackState::Expired;
+        assert!(channel_available(&device, &[session]));
+        device.is_default_multimedia=true;
+        assert!(!channel_available(&device, &[]));
     }
-
-    let device = session
-        .device_name
-        .as_deref()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    device.contains("cable-a")
-        || device.contains("cable a")
-        || device.contains("cable-b")
-        || device.contains("cable b")
 }
-
-fn is_microphone_monitor_process(session: &AudioSessionInfo) -> bool {
-    let exe = session
-        .exe_name
-        .as_deref()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    exe.contains("micvst") || exe.contains("mic-mix") || exe.contains("mic_mixer")
-}
-
-/// The local monitor mirrors the shared render endpoint to the user's normal
-/// speakers/headphones. A microphone-processing app that accidentally follows
-/// that endpoint after a display-device change would therefore create local
-/// sidetone. Mute only that accidental render session while protection is
-/// active; its capture/virtual-cable sessions are not touched.
-fn mute_feedback_sessions(
-    sessions: &SessionService,
-    shared_device_id: &str,
-) -> Result<Vec<String>> {
-    let list = sessions.list_sessions()?;
-    let mut muted = Vec::new();
-    for session in list {
-        if session.muted
-            || session.device_id.as_deref() != Some(shared_device_id)
-            || !is_microphone_monitor_process(&session)
+fn sanitize(apps: Vec<AppIdentity>) -> Vec<AppIdentity> {
+    let mut result = Vec::new();
+    for mut a in apps {
+        a.exe_name = a.exe_name.trim().to_ascii_lowercase();
+        if a.exe_name.is_empty()
+            || crate::process::is_critical_system_process(&a.exe_name)
+            || result
+                .iter()
+                .any(|b: &AppIdentity| b.exe_name == a.exe_name)
         {
             continue;
         }
-        if sessions.set_session_muted(&session.session_id, true)? {
-            muted.push(session.session_id);
-        }
+        result.push(a);
     }
-    Ok(muted)
+    result
 }
-
-fn restore_defaults(mm: Option<&str>, comm: Option<&str>) -> Result<()> {
-    if let Some(id) = mm {
+fn validate_config(c: &AppConfig) -> Result<()> {
+    if !["none", "voice", "system", "private", "remote"].contains(&c.monitor.as_str()) {
+        return Err(AudioError::message(
+            "monitor: usa none, voice, system, private o remote.",
+        ));
+    }
+    Ok(())
+}
+fn persist(store: &StateStore, config: &AppConfig) -> Result<()> {
+    let mut state = store.load()?;
+    state.config = config.clone();
+    state.incomplete_session = None;
+    store.save(&state)
+}
+fn combined_telemetry(i:&EngineInner)->MixTelemetry{
+    merge_signals(i.mixer.as_ref().map(|m|m.telemetry()).unwrap_or_default(),i.unified.as_ref().map(|u|u.telemetry()))
+}
+fn merge_signals(mut t:MixTelemetry,mic:Option<MixTelemetry>)->MixTelemetry{
+    if let Some(mic)=mic{
+        t.running &= mic.running;
+        t.errors.extend(mic.errors);
+        // The virtual microphone may contain voice, PC audio, or both.
+        t.voice_peak=mic.remote_peak;
+        t.microphone_name="Micrófono virtual de UnifiedAudio".into();
+    }
+    t.processor_source=None;
+    t
+}
+#[cfg(test)] mod signal_tests{
+    use super::*;
+    #[test] fn virtual_microphone_mode_does_not_gate_remote_programs(){
+        let system=MixTelemetry{running:true,system_peak:0.4,private_peak:0.3,remote_peak:0.1,..Default::default()};
+        // PC-only virtual microphone has no voice track but does have an output.
+        let mic=MixTelemetry{running:true,voice_peak:0.0,remote_peak:0.7,..Default::default()};
+        let result=merge_signals(system.clone(),Some(mic));
+        assert_eq!(result.voice_peak,0.7);assert_eq!(result.system_peak,0.4);assert_eq!(result.private_peak,0.3);assert_eq!(result.remote_peak,0.1);
+        // Voice-only virtual microphone leaves the independently captured PC meters intact.
+        let result=merge_signals(system,Some(MixTelemetry{running:true,remote_peak:0.6,..Default::default()}));
+        assert_eq!(result.voice_peak,0.6);assert_eq!(result.system_peak,0.4);assert!(result.running);
+    }
+}
+fn status(i: &EngineInner) -> ProtectionStatus {
+    let shared = DeviceService::new()
+        .find_shared_candidate(i.config.preferred_shared_device_id.as_deref())
+        .ok()
+        .flatten();
+    let telemetry = combined_telemetry(i);
+    let remote_ready=!crate::parsec::installed() || crate::parsec::remote_device().is_ok_and(|d|crate::parsec::ready(&d.id));
+    let mut warnings = i.warnings.clone();
+    warnings.extend(telemetry.errors);
+    ProtectionStatus {
+        active: i.enabled && telemetry.running && remote_ready,
+        mode: i.config.mode,
+        message: if i.enabled && telemetry.running && remote_ready {
+            "Mezcla remota por proceso activa. Usa el canal de NoEcho en la aplicación remota."
+        } else {
+            "Mezcla remota detenida."
+        }
+        .into(),
+        excluded_count: i.config.excluded_apps.len(),
+        excluded_apps: i.config.excluded_apps.clone(),
+        physical_device_name: Some("Cada aplicación conserva su salida local".into()),
+        shared_device_name: i
+            .shared_name
+            .clone()
+            .or_else(|| shared.as_ref().map(|s| s.name.clone())),
+        shared_device_available: shared.is_some(),
+        warnings,
+        snapshot: None,
+        process_capture_supported: crate::loopback::process_loopback_supported(),
+        processor: SessionService::new().list_capture_sessions().ok().and_then(|s| crate::processor::detect(&s).ok().flatten()),
+        remote_capture_ready: remote_ready,
+        remote_backend: if crate::parsec::installed(){"parsec"}else{"manual"}.into(),
+    }
+}
+fn restore_legacy(s: &IncompleteSession) -> Result<()> {
+    if let Some(id) = &s.previous_default_multimedia_id {
         set_default_endpoint(id, DefaultRole::Multimedia)?;
     }
-    if let Some(id) = comm {
-        let _ = set_default_endpoint(id, DefaultRole::Communications);
+    if let Some(id) = &s.previous_default_communications_id {
+        set_default_endpoint(id, DefaultRole::Communications)?;
     }
-    Ok(())
-}
-
-fn restore_defaults_from_incomplete(incomplete: &IncompleteSession) -> Result<()> {
-    restore_defaults(
-        incomplete.previous_default_multimedia_id.as_deref(),
-        incomplete.previous_default_communications_id.as_deref(),
-    )?;
-    for app in &incomplete.excluded_apps {
-        if let Some(path) = &app.exe_path {
-            let _ = clear_app_default_endpoint(path);
+    for a in &s.excluded_apps {
+        if let Some(path) = &a.exe_path {
+            clear_app_default_endpoint(path)?;
         }
     }
-    let sessions = SessionService::new();
-    for session_id in &incomplete.muted_feedback_sessions {
-        let _ = sessions.set_session_muted(session_id, false);
+    for id in &s.muted_feedback_sessions {
+        SessionService::new().set_session_muted(id, false)?;
     }
     Ok(())
-}
-
-fn clear_incomplete(store: &StateStore) {
-    if let Ok(mut state) = store.load() {
-        state.incomplete_session = None;
-        if let Some(last) = state.last_protection.as_mut() {
-            last.active = false;
-            last.updated_at = chrono::Local::now().to_rfc3339();
-        }
-        let _ = store.save(&state);
-    }
 }

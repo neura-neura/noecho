@@ -1,0 +1,490 @@
+diff --git a/src/UnifiedAudio.EngineHost/src/HostMain.cpp b/src/UnifiedAudio.EngineHost/src/HostMain.cpp
+index ba1a039..29345e8 100644
+--- a/src/UnifiedAudio.EngineHost/src/HostMain.cpp
++++ b/src/UnifiedAudio.EngineHost/src/HostMain.cpp
+@@ -111,8 +111,8 @@ class HostApplication;
+ class PipeServer final : private juce::Thread
+ {
+ public:
+-    explicit PipeServer (std::function<juce::String (juce::String)> dispatchIn)
+-        : juce::Thread ("EngineControlPipe"), dispatch (std::move (dispatchIn))
++    explicit PipeServer (std::function<juce::String (juce::String)> dispatchIn, const wchar_t* pathIn = pipePath)
++        : juce::Thread ("EngineControlPipe"), dispatch (std::move (dispatchIn)), serverPath (pathIn)
+     {
+         startThread();
+     }
+@@ -193,7 +193,7 @@ private:
+         while (! threadShouldExit())
+         {
+             const auto pipe = CreateNamedPipeW (
+-                pipePath,
++                serverPath,
+                 PIPE_ACCESS_DUPLEX,
+                 PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+                 1,
+@@ -221,6 +221,7 @@ private:
+     }
+ 
+     std::function<juce::String (juce::String)> dispatch;
++    const wchar_t* serverPath;
+     std::atomic<HANDLE> currentPipe { INVALID_HANDLE_VALUE };
+ };
+ #endif
+@@ -319,6 +320,42 @@ public:
+                 }));
+             return result->response;
+         });
++        noEchoServer = std::make_unique<PipeServer> ([this] (juce::String request)
++        {
++            struct Result { juce::WaitableEvent event; juce::String response; };
++            auto result = std::make_shared<Result>();
++            juce::MessageManager::callAsync ([this, result, request]
++            {
++                const auto parsed = juce::JSON::parse (request);
++                const auto name = parsed.getProperty ("name", {}).toString();
++                juce::String error;
++                if (name == "noecho.configure")
++                {
++                    const auto payload = parsed.getProperty ("payload", {});
++                    juce::StringArray apps;
++                    if (auto* list = payload.getProperty ("apps", {}).getArray())
++                        for (const auto& app : *list) apps.add (app.toString().toLowerCase());
++                    error = engine->configureNoEcho (static_cast<bool> (payload.getProperty ("enabled", false)), apps);
++                }
++                else if (name == "noecho.status") engine->heartbeatNoEcho();
++                else error = "Unknown NoEcho command";
++                result->response = responseFor (parsed, objectWith ({
++                    { "active", engine->isNoEchoActive() }, { "running", engine->isRunning() },
++                    { "error", error.isEmpty() ? engine->getNoEchoError() : error },
++                    { "voicePeak", engine->takeNoEchoVoicePeak() }, { "systemPeak", engine->takeNoEchoSystemPeak() },
++                    { "privatePeak", engine->takeNoEchoPrivatePeak() }, { "remotePeak", engine->takeNoEchoOutputPeak() },
++                    { "inputPeak", engine->takeNoEchoInputPeak() },
++                    { "muted", engine->isMutedRequested() },
++                    { "voiceEnabled", engine->getMixerMode() != AudioEngine::MixerMode::system && engine->getVoiceGain() > 0.0f },
++                    { "systemEnabled", engine->getMixerMode() != AudioEngine::MixerMode::voice && engine->getSystemGain() > 0.0f },
++                    { "renderFrames", engine->noEchoRenderFrames() },
++                    { "outputName", engine->getOutputDeviceName() }
++                }), error.isEmpty() ? juce::String() : "noecho-error", error);
++                result->event.signal();
++            });
++            if (! result->event.wait (10000)) return juce::String ("{\"error\":\"NoEcho timeout\"}");
++            return result->response;
++        }, L"\\\\.\\pipe\\UnifiedAudio.NoEcho.v1");
+ #endif
+     }
+ 
+@@ -327,6 +364,7 @@ public:
+         stopTimer();
+ #if JUCE_WINDOWS
+         pipeServer.reset();
++        noEchoServer.reset();
+ #endif
+         pluginEditors.clear (true);
+         persist();
+@@ -1039,6 +1077,7 @@ private:
+     juce::OwnedArray<PluginEditorWindow> pluginEditors;
+ #if JUCE_WINDOWS
+     std::unique_ptr<PipeServer> pipeServer;
++    std::unique_ptr<PipeServer> noEchoServer;
+ #endif
+ };
+ }
+diff --git a/src/UnifiedAudio.EngineHost/src/audio/AudioEngine.cpp b/src/UnifiedAudio.EngineHost/src/audio/AudioEngine.cpp
+index eec1b11..8ecdccc 100644
+--- a/src/UnifiedAudio.EngineHost/src/audio/AudioEngine.cpp
++++ b/src/UnifiedAudio.EngineHost/src/audio/AudioEngine.cpp
+@@ -59,6 +59,26 @@ bool processTreeRelatedAtRuntime (unsigned long leftProcessId, unsigned long rig
+     return reaches (static_cast<DWORD> (leftProcessId), static_cast<DWORD> (rightProcessId))
+         || reaches (static_cast<DWORD> (rightProcessId), static_cast<DWORD> (leftProcessId));
+ }
++
++bool processAncestorAtRuntime (unsigned long root, unsigned long child)
++{
++    if (root == child) return true;
++    const auto snapshot = CreateToolhelp32Snapshot (TH32CS_SNAPPROCESS, 0);
++    if (snapshot == INVALID_HANDLE_VALUE) return false;
++    std::unordered_map<DWORD,DWORD> parents;
++    PROCESSENTRY32W entry {}; entry.dwSize = sizeof (entry);
++    if (Process32FirstW (snapshot, &entry))
++        do { parents[entry.th32ProcessID] = entry.th32ParentProcessID; } while (Process32NextW (snapshot, &entry));
++    CloseHandle (snapshot);
++    for (int depth = 0; depth < 128 && parents.contains (child); ++depth)
++    {
++        const auto parent = parents[child];
++        if (parent == root) return true;
++        if (parent == 0 || parent == child) return false;
++        child = parent;
++    }
++    return false;
++}
+ #else
+ bool processTreeRelatedAtRuntime (unsigned long leftProcessId, unsigned long rightProcessId)
+ {
+@@ -95,7 +115,7 @@ FeedbackLoopEvidence AudioEngine::probeFeedbackLoop (const juce::String& systemD
+ {
+     auto evidence = detectWindowsFeedbackLoop (getOutputDeviceName(), stableOutputDeviceId,
+                                                systemDeviceName, systemDeviceId);
+-    evidence.processFilterEnabled = isProcessFilterEnabled();
++    evidence.processFilterEnabled = useProcessCapture();
+     evidence.finalCaptureConsumersExcluded = finalCaptureConsumersExcluded (evidence);
+     return evidence;
+ }
+@@ -103,7 +123,7 @@ FeedbackLoopEvidence AudioEngine::probeFeedbackLoop (const juce::String& systemD
+ bool AudioEngine::finalCaptureConsumersExcluded (const FeedbackLoopEvidence& evidence) const
+ {
+     if (! evidence.finalCaptureConsumerDetected) return true;
+-    if (! isProcessFilterEnabled()) return false;
++    if (! useProcessCapture()) return false;
+     for (const auto& consumer : evidence.finalCaptureConsumers)
+         for (const auto& pid : processCapturePids)
+             if (pid.load (std::memory_order_acquire) != 0
+@@ -351,7 +371,7 @@ juce::String AudioEngine::initialise (const juce::String& inputDeviceName,
+             return "Feedback prevention: " + feedbackDecision.reason
+                 + ". Choose Voice or disable Windows Listen before enabling PC audio.";
+         }
+-        const auto loopbackError = isProcessFilterEnabled()
++        const auto loopbackError = useProcessCapture()
+             ? reconcileProcessCaptures()
+             : systemCapture.start (systemDeviceName, systemDeviceId, outputRate);
+         if (loopbackError.isNotEmpty())
+@@ -425,7 +445,7 @@ juce::String AudioEngine::configureMixer (MixerMode mode,
+     processFilterDeviceId = systemDeviceId;
+     systemCapture.stop();
+     juce::String error;
+-    if (isProcessFilterEnabled()) error = reconcileProcessCaptures();
++    if (useProcessCapture()) error = reconcileProcessCaptures();
+     else
+     {
+         stopProcessCaptures();
+@@ -483,7 +503,7 @@ juce::String AudioEngine::configureProcessFilter (
+     processFilterExclusionMode.store (exclusionMode, std::memory_order_release);
+     processFilterEnabled.store (enabled, std::memory_order_release);
+ 
+-    if (enabled)
++    if (useProcessCapture())
+     {
+         systemCapture.stop();
+         return reconcileProcessCaptures();
+@@ -514,10 +534,27 @@ void AudioEngine::stopProcessCaptures()
+ 
+ juce::String AudioEngine::reconcileProcessCaptures()
+ {
+-    if (! isProcessFilterEnabled() || getMixerMode() == MixerMode::voice) return {};
++    if (! useProcessCapture() || getMixerMode() == MixerMode::voice) return {};
+ 
+     juce::String error;
+-    const auto sessions = listRenderAudioSessions (processFilterDeviceName, processFilterDeviceId, error);
++    auto sessions = listRenderAudioSessions (processFilterDeviceName, processFilterDeviceId, error);
++    if (isNoEchoActive())
++    {
++        sessions.clear();
++        for (const auto& endpoint : listAudioEndpointIdentities (false))
++        {
++            if (endpoint.id == stableOutputDeviceId) continue;
++            auto found = listRenderAudioSessions (endpoint.name, endpoint.id, error);
++            if (error.isNotEmpty()) break;
++            for (const auto& session : found)
++            {
++                auto existing = std::find_if (sessions.begin(), sessions.end(), [&session] (const auto& s) { return s.processId == session.processId; });
++                if (existing == sessions.end())
++                    sessions.add (session);
++                else existing->active = existing->active || session.active;
++            }
++        }
++    }
+     if (error.isNotEmpty())
+     {
+         stopProcessCaptures();
+@@ -529,7 +566,7 @@ juce::String AudioEngine::reconcileProcessCaptures()
+         return feedbackLoopDescription;
+     }
+ 
+-    struct DesiredCapture { unsigned long pid; juce::String key; float gain; };
++    struct DesiredCapture { unsigned long pid; juce::String key; float gain; bool privateAudio; };
+     juce::Array<DesiredCapture> desired;
+     for (const auto& session : sessions)
+     {
+@@ -537,11 +574,11 @@ juce::String AudioEngine::reconcileProcessCaptures()
+         const auto sessionKey = session.executablePath.isNotEmpty()
+             ? session.executablePath
+             : "session:" + session.sessionId;
+-        auto included = isProcessFilterExclusionMode();
++        auto included = ! isProcessFilterEnabled() || isProcessFilterExclusionMode();
+         auto gain = 1.0f;
+         for (const auto& rule : processMixRules)
+         {
+-            if (rule.executablePath.equalsIgnoreCase (sessionKey))
++            if (isProcessFilterEnabled() && rule.executablePath.equalsIgnoreCase (sessionKey))
+             {
+                 included = ! rule.excluded;
+                 gain = juce::jlimit (0.0f, 4.0f, rule.gain);
+@@ -553,7 +590,23 @@ juce::String AudioEngine::reconcileProcessCaptures()
+         {
+             return item.pid == session.processId;
+         }) != desired.end();
+-        if (! alreadyAdded) desired.add ({ session.processId, sessionKey, gain });
++        const auto privateAudio = std::any_of (sessions.begin(), sessions.end(), [this, &session] (const auto& other)
++        {
++            return noEchoMatches (noEchoApps, other.executablePath)
++                && processTreeRelatedAtRuntime (session.processId, other.processId);
++        });
++        // Keep one capture for a related tree. Prefer the ancestor, because the
++        // Windows capture contains descendants too; private wins for that tree.
++        const auto related = std::find_if (desired.begin(), desired.end(), [&session] (const auto& item)
++        { return processTreeRelatedAtRuntime (item.pid, session.processId); });
++        if (related != desired.end())
++        {
++            related->privateAudio = related->privateAudio || privateAudio;
++            if (processAncestorAtRuntime (session.processId, related->pid))
++            { related->pid = session.processId; related->key = sessionKey; related->gain = gain; }
++            continue;
++        }
++        if (! alreadyAdded) desired.add ({ session.processId, sessionKey, gain, privateAudio });
+     }
+ 
+     for (std::size_t index = 0; index < maxProcessCaptures; ++index)
+@@ -574,6 +627,7 @@ juce::String AudioEngine::reconcileProcessCaptures()
+         else
+         {
+             processCaptureGains[index].store (match->gain, std::memory_order_release);
++            noEchoPrivate[index].store (match->privateAudio, std::memory_order_release);
+             desired.remove (static_cast<int> (match - desired.begin()));
+         }
+     }
+@@ -620,6 +674,7 @@ juce::String AudioEngine::reconcileProcessCaptures()
+         }
+         processCaptureKeys[freeIndex] = item.key;
+         processCaptureGains[freeIndex].store (item.gain, std::memory_order_release);
++        noEchoPrivate[freeIndex].store (item.privateAudio, std::memory_order_release);
+         processCapturePids[freeIndex].store (item.pid, std::memory_order_release);
+         processCaptureIncluded[freeIndex].store (true, std::memory_order_release);
+     }
+@@ -628,7 +683,9 @@ juce::String AudioEngine::reconcileProcessCaptures()
+ 
+ void AudioEngine::refreshProcessFilter()
+ {
+-    if (isRunning() && getMixerMode() != MixerMode::voice && ! isProcessFilterEnabled()
++    if (isNoEchoActive() && juce::Time::getMillisecondCounterHiRes() - noEchoLastHeartbeat > 15000.0)
++        configureNoEcho (false, {});
++    if (isRunning() && getMixerMode() != MixerMode::voice && ! useProcessCapture()
+         && ! systemCapture.isCapturing())
+     {
+         const auto now = juce::Time::getMillisecondCounterHiRes();
+@@ -639,9 +696,40 @@ void AudioEngine::refreshProcessFilter()
+                                                     graphSampleRate.load()); error.isNotEmpty())
+             juce::Logger::writeToLog ("System capture recovery: " + error);
+     }
+-    if (isProcessFilterEnabled() && getMixerMode() != MixerMode::voice)
+-        if (const auto error = reconcileProcessCaptures(); error.isNotEmpty())
+-            juce::Logger::writeToLog ("Application capture refresh: " + error);
++    if (useProcessCapture() && getMixerMode() != MixerMode::voice)
++    {
++        const auto error = reconcileProcessCaptures();
++        noEchoError = error;
++        if (error.isNotEmpty()) juce::Logger::writeToLog ("Application capture refresh: " + error);
++    }
++}
++
++juce::String AudioEngine::configureNoEcho (bool enabled, const juce::StringArray& apps)
++{
++    if (enabled && ! isRunning()) return "Start UnifiedAudio before activating NoEcho.";
++    if (enabled && ! isNoEchoActive())
++    {
++        // Discard levels recorded before this NoEcho session started.
++        takeNoEchoInputPeak(); takeNoEchoVoicePeak(); takeNoEchoSystemPeak();
++        takeNoEchoPrivatePeak(); takeNoEchoOutputPeak();
++    }
++    noEchoApps = apps;
++    for (std::size_t index = 0; index < maxProcessCaptures; ++index)
++        noEchoPrivate[index].store (enabled && noEchoMatches (apps, processCaptureKeys[index]));
++    noEchoEnabled.store (enabled);
++    heartbeatNoEcho();
++    noEchoError.clear();
++    if (getMixerMode() != MixerMode::voice)
++    {
++        systemCapture.stop();
++        if (useProcessCapture()) noEchoError = reconcileProcessCaptures();
++        else
++        {
++            stopProcessCaptures();
++            noEchoError = systemCapture.start (processFilterDeviceName, processFilterDeviceId, graphSampleRate.load());
++        }
++    }
++    return noEchoError;
+ }
+ 
+ void AudioEngine::rebuildGraph()
+@@ -1068,7 +1156,8 @@ void AudioEngine::renderAudio (float* const* outputChannelData,
+         voiceMeter.process (processBuffer.getArrayOfWritePointers(), processBuffer.getNumChannels(), chunk);
+ 
+         systemBuffer.clear (0, chunk);
+-        if (processFilterEnabled.load (std::memory_order_acquire))
++        noEchoPrivateBuffer.clear (0, chunk);
++        if (useProcessCapture())
+         {
+             for (std::size_t index = 0; index < maxProcessCaptures; ++index)
+             {
+@@ -1079,6 +1168,11 @@ void AudioEngine::renderAudio (float* const* outputChannelData,
+                 const auto gain = processCaptureGains[index].load (std::memory_order_relaxed);
+                 systemBuffer.addFrom (0, 0, source, 0, 0, chunk, gain);
+                 systemBuffer.addFrom (1, 0, source, 1, 0, chunk, gain);
++                if (noEchoPrivate[index].load (std::memory_order_acquire))
++                {
++                    noEchoPrivateBuffer.addFrom (0, 0, source, 0, 0, chunk, gain);
++                    noEchoPrivateBuffer.addFrom (1, 0, source, 1, 0, chunk, gain);
++                }
+             }
+         }
+         else
+@@ -1124,10 +1218,15 @@ void AudioEngine::renderAudio (float* const* outputChannelData,
+                     ? systemBuffer.getSample (systemChannel, sample) * pcLevel * currentDuckGain
+                     : 0.0f;
+                 processBuffer.setSample (channel, sample, voice + pc);
++                if (isNoEchoActive() && includeSystem)
++                    processBuffer.setSample (channel, sample, removeNoEchoContribution (
++                        processBuffer.getSample (channel, sample),
++                        noEchoPrivateBuffer.getSample (systemChannel, sample), pcLevel * currentDuckGain));
+             }
+             if (duckHoldFramesRemaining > 0) --duckHoldFramesRemaining;
+         }
+         duckEnvelope.store (currentDuckGain, std::memory_order_relaxed);
++        noEchoPrivateMeter.process (noEchoPrivateBuffer.getArrayOfWritePointers(), 2, chunk);
+ 
+         outputMeter.process (processBuffer.getArrayOfWritePointers(), processBuffer.getNumChannels(), chunk);
+         spectrumAnalyzer.push (processBuffer, chunk);
+diff --git a/src/UnifiedAudio.EngineHost/src/audio/AudioEngine.h b/src/UnifiedAudio.EngineHost/src/audio/AudioEngine.h
+index 395f501..a2884ff 100644
+--- a/src/UnifiedAudio.EngineHost/src/audio/AudioEngine.h
++++ b/src/UnifiedAudio.EngineHost/src/audio/AudioEngine.h
+@@ -13,6 +13,7 @@
+ #include "audio/ScanCoordinator.h"
+ #include "audio/FeedbackLoopPolicy.h"
+ #include "state/Persistence.h"
++#include "audio/NoEchoMix.h"
+ 
+ // Besitzt AudioDeviceManager + AudioProcessorGraph. Der Graph läuft über einen
+ // internen AudioProcessorPlayer; AudioEngine bleibt der Device-Callback und
+@@ -22,6 +23,18 @@ class AudioEngine : private juce::ChangeListener
+ public:
+     enum class MixerMode { voice = 0, system = 1, both = 2 };
+     AudioEngine();
++    juce::String configureNoEcho (bool enabled, const juce::StringArray& apps);
++    void heartbeatNoEcho() { noEchoLastHeartbeat = juce::Time::getMillisecondCounterHiRes(); }
++    bool isNoEchoActive() const { return noEchoEnabled.load(); }
++    juce::String getNoEchoError() const { return noEchoError; }
++    LevelReading noEchoPrivateLevel() const { return noEchoPrivateMeter.read(); }
++    float takeNoEchoVoicePeak() { return voiceMeter.takePeak(); }
++    float takeNoEchoSystemPeak() { return systemMeter.takePeak(); }
++    float takeNoEchoPrivatePeak() { return noEchoPrivateMeter.takePeak(); }
++    float takeNoEchoOutputPeak() { return outputMeter.takePeak(); }
++    float takeNoEchoInputPeak() { return inputMeter.takePeak(); }
++    juce::int64 noEchoRenderFrames() const { return playHead.samples.load (std::memory_order_relaxed); }
++    bool useProcessCapture() const { return isProcessFilterEnabled() || isNoEchoActive(); }
+     ~AudioEngine() override;
+ 
+     juce::String initialise (const juce::String& inputDeviceName,
+@@ -258,12 +271,19 @@ private:
+     juce::AudioProcessorGraph graph;
+     juce::AudioBuffer<float> processBuffer { 2, 8192 };
+     juce::AudioBuffer<float> systemBuffer { 2, 8192 };
++    juce::AudioBuffer<float> noEchoPrivateBuffer { 2, 8192 };
++    std::atomic<bool> noEchoEnabled { false };
++    juce::StringArray noEchoApps;
++    juce::String noEchoError;
++    double noEchoLastHeartbeat = 0;
++    LevelMeter noEchoPrivateMeter;
+     static constexpr std::size_t maxProcessCaptures = 32;
+     std::array<std::unique_ptr<ProcessLoopbackCapture>, maxProcessCaptures> processCaptures;
+     std::array<juce::AudioBuffer<float>, maxProcessCaptures> processMixBuffers;
+     std::array<std::atomic<unsigned long>, maxProcessCaptures> processCapturePids {};
+     std::array<std::atomic<float>, maxProcessCaptures> processCaptureGains {};
+     std::array<std::atomic<bool>, maxProcessCaptures> processCaptureIncluded {};
++    std::array<std::atomic<bool>, maxProcessCaptures> noEchoPrivate {};
+     std::array<juce::String, maxProcessCaptures> processCaptureKeys;
+     std::atomic<bool> processFilterEnabled { false };
+     std::atomic<bool> processFilterExclusionMode { false };
+diff --git a/src/UnifiedAudio.EngineHost/src/audio/Metering.h b/src/UnifiedAudio.EngineHost/src/audio/Metering.h
+index 1b9b24c..414160f 100644
+--- a/src/UnifiedAudio.EngineHost/src/audio/Metering.h
++++ b/src/UnifiedAudio.EngineHost/src/audio/Metering.h
+@@ -31,12 +31,19 @@ public:
+         return { rms_.load (std::memory_order_relaxed),
+                  peak_.load (std::memory_order_relaxed) };
+     }
++    // Independent consumer: do not lose a short pulse between NoEcho polls,
++    // and do not reset the readings used by UnifiedAudio's own interface.
++    float takePeak() { return pendingPeak_.exchange (0.0f, std::memory_order_relaxed); }
+ private:
+     void store (LevelReading r)
+     {
+         rms_.store (r.rms,  std::memory_order_relaxed);
+         peak_.store (r.peak, std::memory_order_relaxed);
++        auto prior = pendingPeak_.load (std::memory_order_relaxed);
++        while (prior < r.peak && ! pendingPeak_.compare_exchange_weak (
++                   prior, r.peak, std::memory_order_relaxed)) {}
+     }
+     std::atomic<float> rms_  { 0.0f };
+     std::atomic<float> peak_ { 0.0f };
++    std::atomic<float> pendingPeak_ { 0.0f };
+ };
+diff --git a/src/UnifiedAudio.EngineHost/tests/EngineTests.cpp b/src/UnifiedAudio.EngineHost/tests/EngineTests.cpp
+index 61056f4..d4d2e85 100644
+--- a/src/UnifiedAudio.EngineHost/tests/EngineTests.cpp
++++ b/src/UnifiedAudio.EngineHost/tests/EngineTests.cpp
+@@ -1,6 +1,7 @@
+ #include <juce_core/juce_core.h>
+ #include <juce_audio_basics/juce_audio_basics.h>
+ #include "audio/Metering.h"
++#include "audio/NoEchoMix.h"
+ #include "audio/AsyncAudioBridge.h"
+ #include "audio/ActiveAudioBlock.h"
+ #include "audio/GraphConnections.h"
+@@ -104,6 +105,18 @@ struct MeteringTests final : juce::UnitTest
+         beginTest ("Peak is absolute across channels");
+         buffer.setSample (1, 10, -0.75f);
+         expectWithinAbsoluteError (computeLevel (buffer).peak, 0.75f, 0.0001f);
++        beginTest ("NoEcho retains a pulse between polls without changing UI readings");
++        LevelMeter meter;
++        meter.process (buffer);
++        buffer.clear();
++        for (int i = 0; i < 200; ++i) meter.process (buffer);
++        expectEquals (meter.read().peak, 0.0f);
++        expectWithinAbsoluteError (meter.takePeak(), 0.75f, 0.0001f);
++        expectEquals (meter.takePeak(), 0.0f);
++        buffer.setSample (0, 1, 0.25f);
++        meter.process (buffer);
++        expectWithinAbsoluteError (meter.takePeak(), 0.25f, 0.0001f);
++        expectWithinAbsoluteError (meter.read().peak, 0.25f, 0.0001f);
+     }
+ };
+ MeteringTests meteringTests;
+@@ -586,6 +599,29 @@ LogRotationTests logRotationTests;
+ 
+ }
+ 
++class NoEchoTests final : public juce::UnitTest
++{
++public:
++    NoEchoTests() : juce::UnitTest ("NoEcho final mix", "Audio") {}
++    void runTest() override
++    {
++        beginTest ("Same-frame subtraction preserves voice and allowed audio under gain changes");
++        for (const auto gain : { 0.0f, 0.15f, 0.75f, 1.0f, 2.0f })
++            for (int i = 0; i < 1000; ++i)
++            {
++                const auto voice = std::sin (i * 0.13f) * 0.2f;
++                const auto allowed = std::sin (i * 0.07f) * 0.1f;
++                const auto selected = std::sin (i * 0.29f) * 0.3f;
++                const auto mixed = voice + (allowed + selected) * gain;
++                expectWithinAbsoluteError (removeNoEchoContribution (mixed, selected, gain), voice + allowed * gain, 0.000001f);
++            }
++        beginTest ("Executable identity matches across restarts and casing");
++        expect (noEchoMatches ({ "ayugram.exe" }, "C:\\Apps\\AyuGram.exe"));
++        expect (! noEchoMatches ({ "ayugram.exe" }, "C:\\Apps\\other.exe"));
++    }
++};
++NoEchoTests noEchoTests;
++
+ int main (int argc, char** argv)
+ {
+     juce::ScopedJuceInitialiser_GUI initialiseJuce;

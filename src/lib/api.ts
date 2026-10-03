@@ -39,6 +39,8 @@ export interface AudioDevice {
 }
 
 export interface ProtectionStatus {
+  remote_capture_ready: boolean;
+  remote_backend: "parsec" | "manual";
   active: boolean;
   mode: "automatic" | "manual";
   message: string;
@@ -48,6 +50,8 @@ export interface ProtectionStatus {
   shared_device_name?: string | null;
   shared_device_available: boolean;
   warnings: string[];
+  process_capture_supported: boolean;
+  processor?: {output_name:string;output_id:string} | null;
 }
 
 export interface SetupStatus {
@@ -82,7 +86,26 @@ export interface AppConfig {
   excluded_apps: AppIdentity[];
   language: Language;
   language_migrated: boolean;
+  microphone_to_remote: boolean;
+  monitor: string;
 }
+
+export interface MixTelemetry {
+  running: boolean;
+  system_peak: number;
+  private_peak: number;
+  voice_peak: number;
+  remote_peak: number;
+  microphone_name: string;
+  monitor_output: string;
+  monitor: string;
+  microphone_to_remote: boolean;
+  streams: { pid: number; private: boolean; peak: number; name: string }[];
+  errors: string[];
+  processor_source?: { input_peak: number; muted: boolean; voice_enabled: boolean; system_enabled: boolean } | null;
+}
+export const getTelemetry = (): Promise<MixTelemetry> => invoke("get_telemetry");
+export const setExcludedApps = (apps: AppIdentity[]): Promise<void> => invoke("set_excluded_apps", { apps });
 
 export async function listAppGroups(): Promise<AppAudioGroup[]> {
   return invoke("list_app_groups");

@@ -40,10 +40,10 @@ pub struct SetupService;
 impl SetupService {
     pub fn status() -> SetupStatus {
         let devices = DeviceService::new().list_render_devices().unwrap_or_default();
-        let shared = DeviceService::new()
+        let shared = crate::parsec::remote_device().ok().filter(|d|crate::parsec::installed() && crate::parsec::ready(&d.id)).or_else(||DeviceService::new()
             .find_shared_candidate(None)
             .ok()
-            .flatten();
+            .flatten());
 
         if let Some(shared) = shared {
             return SetupStatus {

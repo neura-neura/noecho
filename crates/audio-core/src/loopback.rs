@@ -36,7 +36,7 @@ pub fn plan_shared_capture(exclude_pids: &[u32]) -> LoopbackCapturePlan {
         };
     }
     notes.push(format!(
-        "Se excluirán {} procesos raíz de la captura de verificación.",
+        "Se excluirÃ¡n {} procesos raÃ­z de la captura de verificaciÃ³n.",
         exclude_pids.len()
     ));
     LoopbackCapturePlan {
@@ -170,7 +170,7 @@ pub fn probe_device_loopback_energy(
 }
 
 pub fn process_loopback_supported() -> bool {
-    os_build_number().map(|b| b >= 19041).unwrap_or(true)
+    os_build_number().map(|b| b >= 20348).unwrap_or(false)
 }
 
 fn os_build_number() -> Option<u32> {
@@ -222,7 +222,8 @@ impl SharedMonitor {
         let join = std::thread::Builder::new()
             .name("noecho-shared-monitor".into())
             .spawn(move || {
-                if let Err(e) = run_monitor_loop(&shared_device_id, &physical_device_id, stop_thread)
+                if let Err(e) =
+                    run_monitor_loop(&shared_device_id, &physical_device_id, stop_thread)
                 {
                     tracing::error!("shared monitor stopped with error: {e}");
                 }
@@ -334,8 +335,7 @@ fn run_monitor_loop(
                         if to_write > 0 {
                             if let Ok(render_ptr) = renderer.GetBuffer(to_write) {
                                 if !data_ptr.is_null() && !render_ptr.is_null() {
-                                    let bytes =
-                                        (to_write as usize) * (*mix).nBlockAlign as usize;
+                                    let bytes = (to_write as usize) * (*mix).nBlockAlign as usize;
                                     std::ptr::copy_nonoverlapping(data_ptr, render_ptr, bytes);
                                 }
                                 let _ = renderer.ReleaseBuffer(to_write, 0);

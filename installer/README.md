@@ -1,23 +1,9 @@
-# NoEcho installer
+# Instalador de NoEcho 0.2.6
 
-The installer includes the optional VB-CABLE setup files in `installer/payload`.
+Ejecuta `npm run installer` para generar el instalador normal y `dist-installer/NoEcho_0.2.6_un-solo-cable_setup.exe`. El script `NoEcho-Control.ps1` se copia junto al instalador.
 
-NoEcho uses the normal Pack45 cable when a shared channel is needed. Cable A and Cable B are left alone, so they can continue to be used by MicVST and Mic Mix.
+Para Parsec, usa el paquete combinado. Cierra Parsec, UnifiedAudio y NoEcho desde sus bandejas antes de instalar. Se conserva CABLE Input como micrófono y se configura Parsec para recibir la mezcla de NoEcho por Steam Streaming Speakers, ya instalado. El paquete no instala Steam ni necesita Cable A/B. Si falta la salida interna o Parsec sigue abierto, la preparación informa el fallo.
 
-## For the person using NoEcho
+Sin UnifiedAudio, el instalador normal mantiene el modo independiente. Instalar el controlador virtual puede requerir reiniciar Windows.
 
-1. Run the NoEcho installer.
-2. If NoEcho asks for preparation, press **Prepare shared channel** once.
-3. Select Discord or another app.
-4. Press **Hide from remote**.
-5. When finished, press **Restore normal audio**.
-
-The person can change the interface language in **Options**. It is saved automatically.
-
-## Generate the installer
-
-```powershell
-npm run installer
-```
-
-The finished installer is placed in `dist-installer`.
+El paquete combinado ejecuta `noecho.exe --prepare-parsec` antes de finalizar. Esa función solo cambia host_audio_id y host_audio_cancel, con copia de seguridad. Las apps y Windows mantienen sus salidas. NoEcho debe permanecer ejecutándose para entregar la mezcla, incluso cuando las exclusiones están desactivadas. Sigue [el README](../README.md) para pruebas y API.

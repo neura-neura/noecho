@@ -11,9 +11,11 @@ impl ComApartment {
     pub fn init_mta() -> windows::core::Result<Self> {
         let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
         // S_FALSE means COM was already initialized on this thread.
-        if hr.is_ok() || hr == windows::core::HRESULT(1i32) /* S_FALSE */ {
+        if hr.is_ok() || hr == windows::core::HRESULT(1i32)
+        /* S_FALSE */
+        {
             Ok(Self {
-                initialized_here: hr.is_ok() && hr.0 == 0,
+                initialized_here: true,
             })
         } else if hr.0 as u32 == 0x80010106 {
             // RPC_E_CHANGED_MODE — already initialized with different model.
@@ -29,7 +31,7 @@ impl ComApartment {
         let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
         if hr.is_ok() || hr == windows::core::HRESULT(1i32) {
             Ok(Self {
-                initialized_here: hr.is_ok() && hr.0 == 0,
+                initialized_here: true,
             })
         } else if hr.0 as u32 == 0x80010106 {
             Ok(Self {

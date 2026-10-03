@@ -7,8 +7,8 @@ use windows::Win32::Media::Audio::{
     eCommunications, eMultimedia, eRender, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator,
     DEVICE_STATE_ACTIVE,
 };
-use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL, STGM_READ};
 use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
+use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL, STGM_READ};
 use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,9 +68,11 @@ impl DeviceService {
             }
 
             devices.sort_by(|a, b| {
-                b.is_physical_candidate
-                    .cmp(&a.is_physical_candidate)
-                    .then(a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()))
+                b.is_physical_candidate.cmp(&a.is_physical_candidate).then(
+                    a.name
+                        .to_ascii_lowercase()
+                        .cmp(&b.name.to_ascii_lowercase()),
+                )
             });
             Ok(devices)
         }
@@ -97,9 +99,15 @@ impl DeviceService {
     pub fn find_shared_candidate(&self, preferred_id: Option<&str>) -> Result<Option<AudioDevice>> {
         let devices = self.list_render_devices()?;
         if let Some(id) = preferred_id {
-            if let Some(d) = devices.iter().find(|d| d.id == id) {
+            if let Some(d) = devices
+                .iter()
+                .find(|d| d.id == id && d.is_virtual_shared_candidate)
+            {
                 return Ok(Some(d.clone()));
             }
+            return Err(AudioError::DeviceNotFound(
+                "El canal virtual configurado no está disponible.".into(),
+            ));
         }
         if let Some(d) = devices
             .iter()
@@ -123,6 +131,15 @@ impl DeviceService {
         Ok(None)
     }
 
+    /// Automatic alternatives omit microphone-chain and streaming devices.
+    pub fn shared_candidates(&self) -> Result<Vec<AudioDevice>> {
+        let mut devices: Vec<_> = self.list_render_devices()?.into_iter()
+            .filter(|d| d.is_virtual_shared_candidate && is_preferred_shared_virtual(&d.name))
+            .collect();
+        devices.sort_by_key(|d| shared_device_score(&d.name));
+        Ok(devices)
+    }
+
     pub fn choose_physical(
         &self,
         preferred_id: Option<&str>,
@@ -130,7 +147,10 @@ impl DeviceService {
     ) -> Result<AudioDevice> {
         let devices = self.list_render_devices()?;
         if let Some(id) = preferred_id {
-            if let Some(d) = devices.iter().find(|d| d.id == id && d.is_physical_candidate) {
+            if let Some(d) = devices
+                .iter()
+                .find(|d| d.id == id && d.is_physical_candidate)
+            {
                 return Ok(d.clone());
             }
         }
@@ -190,10 +210,7 @@ fn shared_device_score(name: &str) -> i32 {
 
 fn is_mic_chain_virtual(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
-    n.contains("cable-a")
-        || n.contains("cable a")
-        || n.contains("cable-b")
-        || n.contains("cable b")
+    n.contains("cable-a") || n.contains("cable a") || n.contains("cable-b") || n.contains("cable b")
 }
 
 fn is_preferred_shared_virtual(name: &str) -> bool {
@@ -213,7 +230,6 @@ fn is_preferred_shared_virtual(name: &str) -> bool {
 }
 
 fn is_virtual_candidate(name: &str, description: Option<&str>) -> bool {
-
     let hay = format!("{} {}", name, description.unwrap_or("")).to_ascii_lowercase();
     if hay.contains("steam streaming") {
         return true;
@@ -225,7 +241,7 @@ fn is_virtual_candidate(name: &str, description: Option<&str>) -> bool {
 
 unsafe fn device_id(device: &IMMDevice) -> Result<String> {
     let id = device.GetId()?;
-    Ok(pwstr_to_string(id))
+    Ok(owned_pwstr_to_string(id))
 }
 
 unsafe fn device_friendly_name(device: &IMMDevice) -> Result<String> {
@@ -270,6 +286,13 @@ pub(crate) unsafe fn pwstr_to_string(p: windows::core::PWSTR) -> String {
     } else {
         p.to_string().unwrap_or_default()
     }
+}
+
+/// Convert an owned COM string and release the allocator used by Core Audio.
+pub(crate) unsafe fn owned_pwstr_to_string(p: windows::core::PWSTR) -> String {
+    let value = pwstr_to_string(p);
+    windows::Win32::System::Com::CoTaskMemFree(Some(p.0.cast()));
+    value
 }
 
 pub fn set_default_endpoint(device_id: &str, role: DefaultRole) -> Result<()> {

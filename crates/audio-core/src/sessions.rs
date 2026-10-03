@@ -37,6 +37,14 @@ impl SessionService {
     }
 
     pub fn list_sessions(&self) -> Result<Vec<AudioSessionInfo>> {
+        self.enumerate(true)
+    }
+
+    pub(crate) fn list_capture_sessions(&self) -> Result<Vec<AudioSessionInfo>> {
+        self.enumerate(false)
+    }
+
+    fn enumerate(&self, include_icons: bool) -> Result<Vec<AudioSessionInfo>> {
         let _com = crate::com::ComApartment::init_mta()?;
         unsafe {
             let enumerator: IMMDeviceEnumerator =
@@ -53,7 +61,7 @@ impl SessionService {
                 let device_id = get_device_id(&device).ok();
                 let device_name = get_device_name(&device).ok();
                 if let Ok(mut device_sessions) =
-                    enumerate_device_sessions(&device, device_id.clone(), device_name.clone())
+                    enumerate_device_sessions(&device, device_id.clone(), device_name.clone(), include_icons)
                 {
                     sessions.append(&mut device_sessions);
                 }
@@ -64,7 +72,7 @@ impl SessionService {
                     let device_id = get_device_id(&device).ok();
                     let device_name = get_device_name(&device).ok();
                     if let Ok(mut device_sessions) =
-                        enumerate_device_sessions(&device, device_id, device_name)
+                        enumerate_device_sessions(&device, device_id, device_name, include_icons)
                     {
                         sessions.append(&mut device_sessions);
                     }
@@ -119,7 +127,7 @@ impl SessionService {
                     let instance_id = control2
                         .GetSessionInstanceIdentifier()
                         .ok()
-                        .and_then(|value| value.to_string().ok());
+                        .map(|value| crate::devices::owned_pwstr_to_string(value));
                     if instance_id.as_deref() != Some(session_id) {
                         continue;
                     }
@@ -154,6 +162,7 @@ unsafe fn enumerate_device_sessions(
     device: &IMMDevice,
     device_id: Option<String>,
     device_name: Option<String>,
+    include_icons: bool,
 ) -> Result<Vec<AudioSessionInfo>> {
     let manager: IAudioSessionManager2 = device.Activate(CLSCTX_INPROC_SERVER, None)?;
     let enumerator: IAudioSessionEnumerator = manager.GetSessionEnumerator()?;
@@ -181,25 +190,25 @@ unsafe fn enumerate_device_sessions(
         let display_raw = control
             .GetDisplayName()
             .ok()
-            .and_then(|p| unsafe { p.to_string().ok() })
+            .map(|p| unsafe { crate::devices::owned_pwstr_to_string(p) })
             .unwrap_or_default();
 
         let icon_path = control
             .GetIconPath()
             .ok()
-            .and_then(|p| unsafe { p.to_string().ok() })
+            .map(|p| unsafe { crate::devices::owned_pwstr_to_string(p) })
             .filter(|s| !s.is_empty());
 
         let session_identifier = control2
             .GetSessionIdentifier()
             .ok()
-            .and_then(|p| unsafe { p.to_string().ok() })
+            .map(|p| unsafe { crate::devices::owned_pwstr_to_string(p) })
             .unwrap_or_else(|| format!("pid-{pid}-{i}"));
 
         let session_instance = control2
             .GetSessionInstanceIdentifier()
             .ok()
-            .and_then(|p| unsafe { p.to_string().ok() })
+            .map(|p| unsafe { crate::devices::owned_pwstr_to_string(p) })
             .unwrap_or_else(|| session_identifier.clone());
 
         // IsSystemSoundsSession returns HRESULT directly: S_OK=0 system, S_FALSE=1 not.
@@ -224,10 +233,10 @@ unsafe fn enumerate_device_sessions(
             format!("Proceso {pid}")
         };
 
-        let icon_data_url = exe_path
+        let icon_data_url = if include_icons { exe_path
             .as_deref()
             .and_then(icon_data_url_for_path)
-            .or_else(|| icon_path.as_deref().and_then(icon_data_url_for_path));
+            .or_else(|| icon_path.as_deref().and_then(icon_data_url_for_path)) } else { None };
 
         out.push(AudioSessionInfo {
             session_id: session_instance,
@@ -265,7 +274,7 @@ unsafe fn session_volume(control: &IAudioSessionControl) -> (f32, bool) {
 
 unsafe fn get_device_id(device: &IMMDevice) -> Result<String> {
     let id = device.GetId()?;
-    Ok(crate::devices::pwstr_to_string(id))
+    Ok(crate::devices::owned_pwstr_to_string(id))
 }
 
 unsafe fn get_device_name(device: &IMMDevice) -> Result<String> {

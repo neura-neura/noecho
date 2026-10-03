@@ -9,6 +9,11 @@ pub mod error;
 pub mod grouping;
 pub mod icons;
 pub mod loopback;
+pub mod mixer;
+pub mod processor;
+pub mod parsec;
+pub mod unified;
+pub mod cancellation;
 pub mod persist;
 pub mod policy;
 pub mod process;
@@ -26,7 +31,7 @@ pub use persist::{PersistedState, StateStore};
 pub use protection::{ProtectionEngine, ProtectionSnapshot, ProtectionStatus};
 pub use report::DiagnosticReport;
 pub use sessions::{AudioSessionInfo, SessionService};
-pub use setup::{PrepareResult, SetupService, SetupStatus, SetupState};
+pub use setup::{PrepareResult, SetupService, SetupState, SetupStatus};
 pub use types::{AppIdentity, PlaybackState, ProtectionMode};
 
 /// Library version.

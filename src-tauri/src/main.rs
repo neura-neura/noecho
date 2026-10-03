@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod control;
 mod state;
 
 use state::AppState;
@@ -12,6 +13,14 @@ use tauri::{
 use tracing_subscriber::EnvFilter;
 
 fn main() {
+    if std::env::args().any(|a|a=="--prepare-parsec"){
+        if let Err(e)=audio_core::parsec::prepare(){
+            let path=dirs::data_local_dir().unwrap_or_default().join("NoEcho/prepare-error.txt");
+            if let Some(parent)=path.parent(){let _=std::fs::create_dir_all(parent);}
+            let _=std::fs::write(path,e.to_string());std::process::exit(1);
+        }
+        return;
+    }
     // Acquire this before initializing audio or creating a second tray icon.
     // If another process owns the mutex, restore its window and stop here.
     let Some(_single_instance) = acquire_single_instance_or_restore() else {
@@ -19,7 +28,9 @@ fn main() {
     };
 
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .init();
 
     let engine = match audio_core::protection::shared_engine() {
@@ -30,11 +41,16 @@ fn main() {
         }
     };
 
+    if let Err(e) = control::start(engine.clone()) {
+        tracing::error!("{e}");
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .manage(AppState { engine })
         .invoke_handler(tauri::generate_handler![
             commands::list_app_groups,
+            commands::set_excluded_apps,
+            commands::get_telemetry,
             commands::list_devices,
             commands::get_status,
             commands::get_setup_status,
@@ -50,12 +66,16 @@ fn main() {
             let show_i = MenuItem::with_id(app, "show", "Abrir", true, None::<&str>)?;
             let activate_i =
                 MenuItem::with_id(app, "activate", "Activar protecciÃ³n", true, None::<&str>)?;
-            let deactivate_i =
-                MenuItem::with_id(app, "deactivate", "Desactivar protecciÃ³n", true, None::<&str>)?;
+            let deactivate_i = MenuItem::with_id(
+                app,
+                "deactivate",
+                "Desactivar protecciÃ³n",
+                true,
+                None::<&str>,
+            )?;
             let restore_i =
                 MenuItem::with_id(app, "restore", "Restaurar audio normal", true, None::<&str>)?;
-            let quit_i =
-                MenuItem::with_id(app, "quit", "Salir y restaurar", true, None::<&str>)?;
+            let quit_i = MenuItem::with_id(app, "quit", "Salir y restaurar", true, None::<&str>)?;
             let menu = Menu::with_items(
                 app,
                 &[&show_i, &activate_i, &deactivate_i, &restore_i, &quit_i],
@@ -160,10 +180,7 @@ fn acquire_single_instance_or_restore() -> Option<SingleInstanceGuard> {
     {
         Ok(file) => Some(SingleInstanceGuard { _file: file }),
         Err(_) => {
-            let title: Vec<u16> = "NoEcho"
-                .encode_utf16()
-                .chain(std::iter::once(0))
-                .collect();
+            let title: Vec<u16> = "NoEcho".encode_utf16().chain(std::iter::once(0)).collect();
             let window = unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) };
             if !window.is_null() {
                 unsafe {

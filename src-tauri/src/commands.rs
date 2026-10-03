@@ -9,6 +9,19 @@ use audio_core::types::AppIdentity;
 use tauri::State;
 
 #[tauri::command]
+pub fn set_excluded_apps(state: State<'_, AppState>, apps: Vec<AppIdentity>) -> Result<(), String> {
+    state
+        .engine
+        .set_excluded_apps(apps)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_telemetry(state: State<'_, AppState>) -> audio_core::mixer::MixTelemetry {
+    state.engine.telemetry()
+}
+
+#[tauri::command]
 pub fn list_app_groups(state: State<'_, AppState>) -> Result<Vec<AppAudioGroup>, String> {
     state.engine.list_app_groups().map_err(|e| e.to_string())
 }
@@ -52,10 +65,7 @@ pub fn activate_protection(
     state: State<'_, AppState>,
     apps: Vec<AppIdentity>,
 ) -> Result<ProtectionStatus, String> {
-    state
-        .engine
-        .activate(Some(apps))
-        .map_err(|e| e.to_string())
+    state.engine.activate(Some(apps)).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
