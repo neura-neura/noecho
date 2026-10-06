@@ -1,4 +1,4 @@
-# NoEcho 0.2.6
+# NoEcho 0.2.7
 
 ## Uso diario
 
@@ -10,7 +10,7 @@ Puedes cambiar la selección mientras NoEcho está activado. No hace falta desma
 
 ## Instalación para Parsec
 
-Cierra **Parsec**, **UnifiedAudio** y **NoEcho** desde sus bandejas. Ejecuta `NoEcho_0.2.6_un-solo-cable_setup.exe`. Después abre UnifiedAudio, NoEcho y Parsec. NoEcho debe permanecer abierto, aunque sea en la bandeja, para entregar la mezcla a Parsec.
+Cierra **Parsec**, **UnifiedAudio** y **NoEcho** desde sus bandejas. Ejecuta `NoEcho_0.2.7_un-solo-cable_setup.exe`. Después abre UnifiedAudio, NoEcho y Parsec. NoEcho debe permanecer abierto, aunque sea en la bandeja, para entregar la mezcla a Parsec.
 
 Esta integración necesita **Steam Streaming Speakers**, una salida virtual ya instalada en el equipo de desarrollo. El instalador detecta su identificador real y configura Parsec automáticamente para capturarla con su cancelación propia desactivada. No instala Steam ni otro cable. Si esa salida no existe, explica el requisito y no configura Parsec hacia una salida inexistente. Los cambios de Parsec se realizan solo con Parsec cerrado; se guarda `config.json.before-noecho` junto a su configuración.
 
@@ -50,71 +50,48 @@ Los sonidos de Windows sin PID propio, audio protegido, exclusivo o inaccesible 
 
 ## API y comandos del sistema
 
-La API controla la instancia abierta de NoEcho en la sesión del usuario de la PC destino. NoEcho debe ejecutarse (puede estar en la bandeja). No es un servicio de Windows y no inicia sesión ni reproduce audio en una sesión cerrada.
+El control por red está disponible al instalar NoEcho 0.2.7. No requiere clave, SSH ni habilitar un botón. El instalador solicita el permiso de administrador de Windows para crear una regla de firewall que permite TCP 47832 para NoEcho desde la misma subred, en redes físicas o virtuales como ZeroTier. Todos los equipos de esa subred pueden controlar NoEcho. No publiques este puerto en Internet.
 
-Escucha en `http://127.0.0.1:47832`. Cada apertura genera un token en `%LOCALAPPDATA%\NoEcho\api-token`; todas las solicitudes requieren `Authorization: Bearer <token>`. El token cambia al reiniciar. La API escucha solo en localhost; usa SSH, PowerShell Remoting o un túnel SSH desde otra PC. No abras este puerto directamente a Internet.
+NoEcho debe permanecer abierto en la PC destino, aunque esté en la bandeja. La API escucha en las direcciones IPv4 de ese equipo y en localhost. En **Ajustes → Control desde otra PC** se muestran las direcciones y puedes copiar los comandos. Si cambia la IP de la red, utiliza la nueva IP.
 
-El script `scripts/NoEcho-Control.ps1` se distribuye junto al instalador y como recurso de la aplicación. Guárdalo, por ejemplo, en `C:\NoEcho\NoEcho-Control.ps1` en la PC destino.
+Desde PowerShell en tu PC, estos ejemplos controlan el equipo `192.168.196.211`:
 
 ```powershell
-.\NoEcho-Control.ps1 -Command status
-.\NoEcho-Control.ps1 -Command apps
-.\NoEcho-Control.ps1 -Command exclude -Apps discord.exe,spotify.exe
-.\NoEcho-Control.ps1 -Command start
-.\NoEcho-Control.ps1 -Command include -Apps spotify.exe
-.\NoEcho-Control.ps1 -Command monitor -Value voice
-.\NoEcho-Control.ps1 -Command monitor -Value remote
-.\NoEcho-Control.ps1 -Command monitor -Value none
-.\NoEcho-Control.ps1 -Command voice -Value true
-.\NoEcho-Control.ps1 -Command meters
-.\NoEcho-Control.ps1 -Command stop
+# Desactivar el filtro, conservando el audio completo de Parsec
+Invoke-RestMethod 'http://192.168.196.211:47832/v1/command' -Method Post -ContentType 'application/json' -Body '{"command":"stop"}'
+# Activar con las apps ya seleccionadas
+Invoke-RestMethod 'http://192.168.196.211:47832/v1/command' -Method Post -ContentType 'application/json' -Body '{"command":"start"}'
+# Consultar el estado
+Invoke-RestMethod 'http://192.168.196.211:47832/v1/status'
+# Añadir una app a las exclusiones
+Invoke-RestMethod 'http://192.168.196.211:47832/v1/command' -Method Post -ContentType 'application/json' -Body '{"command":"exclude","apps":["telegram.exe"]}'
 ```
 
-| Comando | Parámetros | Resultado |
+También se incluye `scripts/NoEcho-Control.ps1` en la instalación:
+
+```powershell
+.\NoEcho-Control.ps1 -Computer 192.168.196.211 -Command stop
+.\NoEcho-Control.ps1 -Computer 192.168.196.211 -Command start
+.\NoEcho-Control.ps1 -Computer 192.168.196.211 -Command status
+.\NoEcho-Control.ps1 -Computer 192.168.196.211 -Command exclude -Apps telegram.exe
+```
+
+Sin `-Computer`, el script controla NoEcho en tu propia PC. `-BaseUrl` permite elegir otra URL.
+
+| Comando | Parámetros JSON | Resultado |
 | --- | --- | --- |
-| `status`, `apps`, `devices`, `config`, `meters` | Ninguno | Datos en JSON. |
-| `start` | `-Apps` opcional | Inicia la mezcla; apps reemplaza las exclusiones. Permite reaplicar una mezcla activa. |
-| `stop` | Ninguno | Detiene mezcla y escucha sin cambiar salidas locales. |
-| `exclude` / `include` | `-Apps nombre.exe,...` | Añade o elimina exclusiones y confirma su aplicación. |
-| `set-exclusions` | `-Apps` o lista vacía | Reemplaza la lista, incluidas apps que se abrirán después. |
-| `monitor` | `-Value none/voice/system/private/remote` | Selecciona escucha de prueba. |
-| `voice` | `-Value true/false` | Incluye o quita la voz de la mezcla. |
-| `channel` | `-Value ID` o `automatic` | Elige canal virtual con la mezcla detenida; usa `devices` para obtener IDs. |
+| `status`, `apps`, `devices`, `config`, `meters` | Ninguno | Consulta los datos. |
+| `start` | `apps` opcional | Activa el filtro; si apps no está vacío, reemplaza las exclusiones. |
+| `stop` | Ninguno | Desactiva el filtro y la escucha; Parsec conserva su mezcla sin exclusiones. |
+| `exclude` / `include` | `apps`: lista de ejecutables | Añade o elimina exclusiones. |
+| `set-exclusions` | `apps`: lista, puede estar vacía | Reemplaza las exclusiones. |
+| `monitor` | `value`: `none`, `voice`, `system`, `private`, `remote` | Selecciona la escucha de prueba. |
+| `voice` | `value`: booleano | Incluye o quita el micrófono en la mezcla remota cuando no lo entrega UnifiedAudio. |
+| `channel` | `value`: ID o null | Elige canal en el modo manual con la mezcla detenida. Parsec administra su canal automáticamente. |
 
-El script devuelve JSON y termina con código 1 si falla. No imprime el token. Usa el mismo usuario de Windows que ejecuta NoEcho; otro perfil tiene otra carpeta de AppData.
+`GET /v1/status`, `/v1/apps`, `/v1/devices`, `/v1/config` y `/v1/meters` consultan datos. `POST /v1/command` recibe los comandos anteriores. Respuestas: `{"ok":true,"data":...}` o `{"ok":false,"error":"..."}`. Un comando inválido devuelve HTTP 400; una ruta desconocida, 404; una solicitud con cabecera Origin de navegador, 403. El cuerpo máximo es 64 KiB. Revisa `status.warnings` y `meters.errors` para comprobar la captura.
 
-### Desde otra PC mediante SSH
-
-Con OpenSSH ya habilitado y autorizado en la PC destino:
-
-```powershell
-ssh usuario@PC-DESTINO 'powershell -NoProfile -File C:\NoEcho\NoEcho-Control.ps1 -Command exclude -Apps discord.exe'
-ssh usuario@PC-DESTINO 'powershell -NoProfile -File C:\NoEcho\NoEcho-Control.ps1 -Command start'
-ssh usuario@PC-DESTINO 'powershell -NoProfile -File C:\NoEcho\NoEcho-Control.ps1 -Command meters'
-```
-
-Con PowerShell Remoting configurado:
-
-```powershell
-Invoke-Command -ComputerName PC-DESTINO -Credential (Get-Credential) -ScriptBlock {
-  & 'C:\NoEcho\NoEcho-Control.ps1' -Command exclude -Apps 'discord.exe','spotify.exe'
-}
-```
-
-### HTTP para tus herramientas
-
-`GET /v1/status`, `/v1/apps`, `/v1/devices`, `/v1/config` y `/v1/meters` consultan datos. `POST /v1/command` acepta JSON:
-
-```powershell
-$apiToken = (Get-Content "$env:LOCALAPPDATA\NoEcho\api-token" -Raw).Trim()
-$headers = @{ Authorization = "Bearer $apiToken" }
-Invoke-RestMethod http://127.0.0.1:47832/v1/command -Method Post -Headers $headers `
-  -ContentType application/json -Body '{"command":"exclude","apps":["discord.exe"]}'
-Invoke-RestMethod http://127.0.0.1:47832/v1/command -Method Post -Headers $headers `
-  -ContentType application/json -Body '{"command":"voice","value":false}'
-```
-
-Respuestas: `{"ok":true,"data":...}` o `{"ok":false,"error":"..."}`. Errores de comando: HTTP 400; autenticación: 401; rutas desconocidas: 404; orígenes de navegador: 403. El límite de cuerpo es 64 KiB. Consulta `status.warnings` y `meters.errors`: iniciar no garantiza que todos los procesos sean capturables.
+Si Windows deniega el permiso de firewall durante la instalación, se muestra un aviso y el acceso desde la red puede quedar bloqueado. Vuelve a ejecutar el instalador y acepta ese permiso. No necesitas modificar dispositivos de audio.
 
 ## Desarrollo y generar instalador
 

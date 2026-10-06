@@ -1,4 +1,4 @@
-//! Authenticated loopback API. Remote operators use SSH/PowerShell remoting.
+//! Local and LAN control API. The installer scopes the firewall rule to LocalSubnet.
 use audio_core::protection::SharedEngine;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -89,29 +89,47 @@ fn identities(names: Vec<String>) -> Vec<audio_core::AppIdentity> {
         })
         .collect()
 }
+
+fn control_dir()->Result<std::path::PathBuf,String>{
+    dirs::data_local_dir().map(|p|p.join("NoEcho")).ok_or("No hay AppData".into())
+}
+fn powershell(script:&str)->Result<String,String>{
+    use std::os::windows::process::CommandExt;
+    let output=std::process::Command::new("powershell.exe").args(["-NoProfile","-NonInteractive","-Command",script]).creation_flags(0x08000000).output().map_err(|e|e.to_string())?;
+    if !output.status.success(){return Err(String::from_utf8_lossy(&output.stderr).trim().into());}
+    Ok(String::from_utf8_lossy(&output.stdout).trim().into())
+}
+fn network_ips()->Result<Vec<String>,String>{
+    let result=powershell("$ErrorActionPreference='Stop'; Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | ForEach-Object { Get-NetIPAddress -InterfaceIndex $_.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue } | Where-Object { $_.AddressState -eq 'Preferred' } | Select-Object -ExpandProperty IPAddress")?;
+    let ips:Vec<_>=result.lines().filter_map(|s|s.trim().parse::<std::net::Ipv4Addr>().ok()).filter(|ip|!ip.is_loopback() && !ip.is_unspecified() && !ip.is_link_local()).map(|ip|ip.to_string()).collect();
+    if ips.is_empty(){return Err("Conecta el equipo a la red y vuelve a intentarlo.".into());}Ok(ips)
+}
+#[tauri::command]
+pub fn get_control_info()->Result<Value,String>{
+    Ok(json!({"urls":network_ips().unwrap_or_default().iter().map(|ip|format!("http://{ip}:47832")).collect::<Vec<_>>()}))
+}
+pub fn setup_network()->Result<(),String>{
+    let dir=control_dir()?;std::fs::create_dir_all(&dir).map_err(|e|e.to_string())?;
+    let script_path=dir.join("enable-remote.ps1");
+    std::fs::write(&script_path,include_str!("../../scripts/Enable-NoEchoRemote.ps1")).map_err(|e|e.to_string())?;
+    let path=script_path.to_string_lossy().replace('\'',"''");
+    let exe=std::env::current_exe().map_err(|e|e.to_string())?.to_string_lossy().replace('\'',"''");
+    powershell(&format!("$ErrorActionPreference='Stop'; $p=Start-Process powershell.exe -Verb RunAs -WindowStyle Hidden -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File \"{path}\" -ProgramPath \"{exe}\"' -Wait -PassThru; if ($p.ExitCode -ne 0) {{ throw 'No se pudo permitir NoEcho en el firewall.' }}"))?;Ok(())
+}
 pub fn start(engine: SharedEngine) -> Result<(), String> {
-    let server = Server::http("127.0.0.1:47832").map_err(|e| format!("API: {e}"))?;
+    let server = Server::http("0.0.0.0:47832").map_err(|e| format!("API: {e}"))?;
     let dir = dirs::data_local_dir()
         .ok_or("No hay AppData")?
         .join("NoEcho");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let token = format!(
-        "{}{}",
-        uuid::Uuid::new_v4().simple(),
-        uuid::Uuid::new_v4().simple()
-    );
-    std::fs::write(dir.join("api-token"), &token).map_err(|e| e.to_string())?;
+    serve(server,engine)?;
+    Ok(())
+}
+fn serve(server:Server,engine:SharedEngine)->Result<(),String>{
     std::thread::Builder::new()
         .name("noecho-control".into())
         .spawn(move || {
             for mut req in server.incoming_requests() {
-                let authorized = req.headers().iter().any(|h| {
-                    h.field.equiv("Authorization") && h.value.as_str() == format!("Bearer {token}")
-                });
-                if !authorized {
-                    reply(req, 401, json!({"error":"Unauthorized"}));
-                    continue;
-                }
                 if req.headers().iter().any(|h| h.field.equiv("Origin")) {
                     reply(req, 403, json!({"error":"Browser origins are not allowed"}));
                     continue;

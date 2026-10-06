@@ -131,6 +131,9 @@ export async function getConfig(): Promise<AppConfig> {
   return invoke("get_config");
 }
 
+export type ControlInfo = {urls:string[]};
+export function getControlInfo():Promise<ControlInfo>{return invoke("get_control_info");}
+
 export async function updateConfig(config: AppConfig): Promise<AppConfig> {
   return invoke("update_config", { config });
 }

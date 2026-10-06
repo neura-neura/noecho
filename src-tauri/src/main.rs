@@ -13,6 +13,9 @@ use tauri::{
 use tracing_subscriber::EnvFilter;
 
 fn main() {
+    if std::env::args().any(|a|a=="--setup-network") {
+        if let Err(e)=control::setup_network(){eprintln!("{e}");std::process::exit(1);}return;
+    }
     if std::env::args().any(|a|a=="--prepare-parsec"){
         if let Err(e)=audio_core::parsec::prepare(){
             let path=dirs::data_local_dir().unwrap_or_default().join("NoEcho/prepare-error.txt");
@@ -48,6 +51,7 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .manage(AppState { engine })
         .invoke_handler(tauri::generate_handler![
+            control::get_control_info,
             commands::list_app_groups,
             commands::set_excluded_apps,
             commands::get_telemetry,
