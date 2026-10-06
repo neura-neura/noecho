@@ -72,6 +72,7 @@ impl ProtectionEngine {
             store.save(&state)?;
         }
         state.config.monitor = "none".into();
+        if state.config.migrate_startup_default() { store.save(&state)?; }
         if state.config.start_with_windows {if let Err(e)=crate::startup::configure(true){warnings.push(e.to_string());}}
         let engine=Self {
             inner: Mutex::new(EngineInner {

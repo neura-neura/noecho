@@ -14,6 +14,16 @@ use tauri::{
 use tracing_subscriber::EnvFilter;
 
 fn main() {
+    if std::env::args().any(|a|a=="--setup-startup") {
+        let result=(||->audio_core::error::Result<()> {
+            let store=audio_core::persist::StateStore::open_default()?;
+            let mut state=store.load()?;
+            state.config.migrate_startup_default();
+            audio_core::startup::configure(state.config.start_with_windows)?;
+            store.save(&state)
+        })();
+        if let Err(e)=result{eprintln!("{e}");std::process::exit(1);}return;
+    }
     if std::env::args().any(|a|a=="--start-pending-integration"){
         if let Err(e)=integration::start_pending(){eprintln!("{e}");std::process::exit(1);}return;
     }

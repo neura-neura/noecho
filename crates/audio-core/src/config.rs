@@ -16,6 +16,8 @@ pub struct AppConfig {
     pub theme: ThemePreference,
     pub mode: ProtectionMode,
     pub start_with_windows: bool,
+    #[serde(default)]
+    pub startup_default_migrated: bool,
     pub minimize_to_tray: bool,
     pub close_to_tray: bool,
     pub restore_on_exit: bool,
@@ -36,7 +38,8 @@ impl Default for AppConfig {
         Self {
             theme: ThemePreference::System,
             mode: ProtectionMode::Automatic,
-            start_with_windows: false,
+            start_with_windows: true,
+            startup_default_migrated: true,
             minimize_to_tray: true,
             close_to_tray: true,
             restore_on_exit: true,
@@ -51,5 +54,29 @@ impl Default for AppConfig {
             microphone_to_remote: false,
             monitor: "none".into(),
         }
+    }
+}
+
+impl AppConfig {
+    pub fn migrate_startup_default(&mut self) -> bool {
+        if self.startup_default_migrated { return false; }
+        self.start_with_windows = true;
+        self.startup_default_migrated = true;
+        true
+    }
+}
+
+#[cfg(test)] mod tests {
+    #[test] fn startup_defaults_on_and_upgrade_preserves_later_opt_out() {
+        use super::AppConfig;
+        assert!(AppConfig::default().start_with_windows);
+        let mut config:AppConfig=serde_json::from_str(r#"{"start_with_windows":false,"language":"es"}"#).unwrap();
+        assert!(config.migrate_startup_default());
+        assert!(config.start_with_windows);
+        assert_eq!(config.language,"es");
+        config.start_with_windows=false;
+        let mut saved:AppConfig=serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert!(!saved.migrate_startup_default());
+        assert!(!saved.start_with_windows);
     }
 }

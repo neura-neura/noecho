@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Search, Shield } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
-import { ControlInfo, getControlInfo } from "@/lib/api";
+
 import { activateProtection, AppAudioGroup, AppConfig, AudioDevice, copyDiagnosticReport, deactivateProtection, getConfig, getSetupStatus, getStatus, getTelemetry, listAppGroups, listDevices, MixTelemetry, prepareSharedAudio, ProtectionStatus, setExcludedApps, SetupStatus, updateConfig } from "@/lib/api";
 
 export default function App() {
@@ -159,7 +159,7 @@ function Options({config,devices,managedRemote,busy,text,onClose,onPatch,onCopy}
  return <Dialog title={text("Ajustes", "Settings")} onClose={onClose} text={text}>
  <label className="simple-option"><Checkbox disabled={busy || !config} checked={!!config?.start_with_windows} onCheckedChange={v=>onPatch({start_with_windows:!!v})}/>{text("Iniciar con Windows", "Start with Windows")}</label>
  <p>{text("Al iniciar sesión, NoEcho se abre en la bandeja.", "At sign-in, NoEcho starts in the system tray.")}</p>
- <RemoteControl text={text}/>
+
  <label className="simple-field">{text("Idioma", "Language")}<select disabled={busy} value={config?.language||"es"} onChange={e=>onPatch({language:e.target.value as AppConfig["language"]})}><option value="es">Español</option><option value="en">English</option></select></label>
  <label className="simple-field">{text("Colores de la ventana", "Window colors")}<select disabled={busy} value={config?.theme||"system"} onChange={e=>onPatch({theme:e.target.value as AppConfig["theme"]})}><option value="system">{text("Como Windows", "Same as Windows")}</option><option value="light">{text("Claros", "Light")}</option><option value="dark">{text("Oscuros", "Dark")}</option></select></label>
  <details className="helper-details"><summary>{text("Para quien prepara el equipo", "For the person setting up this computer")}</summary>
@@ -168,11 +168,4 @@ function Options({config,devices,managedRemote,busy,text,onClose,onPatch,onCopy}
  <p>{text("El control desde otra PC se explica en el README.", "Control from another PC is explained in the README.")}</p>
  <button className="text-button" disabled={busy} onClick={onCopy}>{text("Copiar información para pedir ayuda", "Copy information for support")}</button></details>
  </Dialog>;
-}
-
-function RemoteControl({text}:{text:(a:string,b:string)=>string}){
- const [info,setInfo]=useState<ControlInfo|null>(null),[message,setMessage]=useState("");
- useEffect(()=>{getControlInfo().then(setInfo).catch(e=>setMessage(String(e)));},[]);
- async function copy(url:string){try{await navigator.clipboard.writeText(`# Turn off\nInvoke-RestMethod '${url}/v1/command' -Method Post -ContentType 'application/json' -Body '{"command":"stop"}'\n# Turn on\nInvoke-RestMethod '${url}/v1/command' -Method Post -ContentType 'application/json' -Body '{"command":"start"}'`);setMessage(text("Comandos copiados. Pégalos en PowerShell en la otra PC.","Commands copied. Paste them in PowerShell on the other PC."));}catch(e){setMessage(String(e));}}
- return <section className="simple-signal"><h3>{text("Control desde otra PC","Control from another PC")}</h3><p>{text("Disponible al instalar. Desde otro equipo de tu red puedes activar y desactivar NoEcho con comandos, sin clave.","Available after installation. Another PC on your network can turn NoEcho on and off using commands, without a key.")}</p>{info?.urls.map(url=><div key={url}><code>{url}</code><button className="text-button" onClick={()=>void copy(url)}>{text("Copiar comandos","Copy commands")}</button></div>)}{info && !info.urls.length && <p>{text("Conecta este equipo a la red para ver su IP.","Connect this PC to the network to see its IP.")}</p>}{message && <p role="status">{message}</p>}</section>;
 }

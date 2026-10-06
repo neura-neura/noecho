@@ -24,15 +24,15 @@ FunctionEnd
 Function OptionsLeave
   ${NSD_GetState} $CloseAppsCheckbox $CloseApps
 FunctionEnd
-Name "NoEcho 0.2.9 — un solo cable"
-OutFile "..\dist-installer\NoEcho_0.2.9_un-solo-cable_setup.exe"
+Name "NoEcho 0.2.10 — un solo cable"
+OutFile "..\dist-installer\NoEcho_0.2.10_un-solo-cable_setup.exe"
 ShowInstDetails show
 Page custom OptionsPage OptionsLeave
 Page instfiles
 Section
   InitPluginsDir
   SetOutPath "$PLUGINSDIR"
-  File /oname=NoEcho-setup.exe "..\target\release\bundle\nsis\NoEcho_0.2.9_x64-setup.exe"
+  File /oname=NoEcho-setup.exe "..\target\release\bundle\nsis\NoEcho_0.2.10_x64-setup.exe"
   File /oname=engine.exe "integration\UnifiedAudio Engine Host.exe"
   File /oname=NoEcho-route.exe "..\target\release\noecho.exe"
   File "Update-UnifiedAudioEngine.ps1"
