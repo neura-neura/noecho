@@ -86,8 +86,10 @@ impl ProtectionEngine {
         if let Ok(d)=crate::parsec::remote_device(){
             if crate::parsec::ready(&d.id){
                 let mut inner=engine.inner.lock();
-                if !channel_available(&d,&SessionService::new().list_capture_sessions()?){
-                    inner.warnings.push("La salida interna de Parsec está ocupada por otra aplicación.".into());
+                let sessions=SessionService::new().list_capture_sessions()?;
+                let conflicts=remote_channel_conflicts(&d,&sessions);
+                if !conflicts.is_empty(){
+                    inner.warnings.push(format!("La salida interna de Parsec está ocupada por: {}.",conflicts.join(", ")));
                     drop(inner);return Ok(engine);
                 }
                 inner.config.preferred_shared_device_id=Some(d.id.clone());
@@ -195,7 +197,8 @@ impl ProtectionEngine {
         let processor=crate::processor::detect(&sessions)?;
         if crate::parsec::installed(){
             let remote=crate::parsec::remote_device()?;
-            if !channel_available(&remote,&sessions){return Err(AudioError::message("La salida interna de Parsec está ocupada por otra aplicación. No se puede filtrar su audio de forma segura."));}
+            let conflicts=remote_channel_conflicts(&remote,&sessions);
+            if !conflicts.is_empty(){return Err(AudioError::message(format!("La salida interna de Parsec está ocupada por: {}. Cierra esa aplicación o cambia su salida.",conflicts.join(", "))));}
             if !crate::parsec::ready(&remote.id){return Err(AudioError::message("Falta preparar Parsec. Cierra Parsec desde su bandeja y ejecuta el instalador nuevo; NoEcho configurará su captura sin cambiar tu micrófono."));}
             if processor.is_some() {
                 if let Some(u)=&inner.unified{u.update(&config.excluded_apps)?;}
@@ -318,6 +321,18 @@ fn channel_available(device: &AudioDevice, sessions: &[AudioSessionInfo]) -> boo
         && s.state == crate::types::PlaybackState::Active)
 }
 
+fn remote_channel_conflicts(device:&AudioDevice,sessions:&[AudioSessionInfo])->Vec<String>{
+    if device.is_default_multimedia || device.is_default_communications {return vec!["la salida predeterminada de Windows".into()];}
+    sessions.iter().filter(|s|{
+        if s.device_id.as_deref()!=Some(&device.id) || s.pid==0 || s.pid==std::process::id() || s.state!=crate::types::PlaybackState::Active {return false;}
+        !s.exe_name.as_deref().is_some_and(is_parsec_output_process)
+    }).map(|s|s.display_name.clone()).collect()
+}
+
+fn is_parsec_output_process(name:&str)->bool{
+    ["parsecd.exe","steam.exe"].iter().any(|allowed|name.eq_ignore_ascii_case(allowed))
+}
+
 #[cfg(test)]
 mod selection_tests {
     use super::*;
@@ -334,6 +349,12 @@ mod selection_tests {
         assert!(channel_available(&device, &[session]));
         device.is_default_multimedia=true;
         assert!(!channel_available(&device, &[]));
+    }
+    #[test]
+    fn parsec_output_sessions_are_allowed_but_other_audio_is_not(){
+        assert!(is_parsec_output_process("parsecd.exe"));
+        assert!(is_parsec_output_process("Steam.exe"));
+        assert!(!is_parsec_output_process("telegram.exe"));
     }
 }
 fn sanitize(apps: Vec<AppIdentity>) -> Vec<AppIdentity> {

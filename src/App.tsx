@@ -70,6 +70,8 @@ export default function App() {
   const rawProblem = error || warnings.join(" · ");
   const problemDetail = es ? rawProblem : rawProblem
     .replace(/El canal remoto está ocupado por: (.*)\. Cambia su salida.*$/, "The audio channel is being used by: $1. In Settings, choose Choose automatically, then try Turn on again.")
+    .replace(/La salida interna de Parsec está ocupada por: (.*)\. Cierra esa aplicación o cambia su salida\./, "The internal Parsec output is being used by: $1. Close that app or change its output.")
+    .replace(/La salida interna de Parsec está ocupada por: (.*)\./, "The internal Parsec output is being used by: $1.")
     .replace(/El canal remoto es una salida predeterminada.*$/, "The NoEcho audio channel is your Windows default output. Select your speakers or headphones in Windows, then try again.")
     .replace(/Falta un canal virtual dedicado.*$/, "NoEcho needs its audio connection set up. Open Help to set up audio.")
     .replace(/El canal virtual configurado no está disponible\./, "The saved audio channel is unavailable. Choose Choose automatically in Settings.");
