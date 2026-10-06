@@ -42,7 +42,7 @@ Pulsa **Escuchar** con auriculares para probar una señal. Cerrar esta ventana d
 
 ## Requisitos y límites
 
-Windows con compilación 20348 o posterior y una salida remota independiente. [Microsoft documenta la versión necesaria para capturar procesos](https://learn.microsoft.com/en-us/samples/microsoft/windows-classic-samples/applicationloopbackaudio-sample/). Esta integración automática utiliza la salida de Steam existente; no requiere Cable A/B. El mismo cable de micrófono no puede representar a la vez dos mezclas distintas.
+Windows 10 versión 2004 (build 19041) o posterior y una salida remota independiente. [Microsoft documenta la captura por proceso desde Windows 10 versión 2004](https://learn.microsoft.com/en-us/samples/microsoft/windows-classic-samples/applicationloopbackaudio-sample/). Esta integración automática utiliza la salida de Steam existente; no requiere Cable A/B. El mismo cable de micrófono no puede representar a la vez dos mezclas distintas.
 
 Los sonidos de Windows sin PID propio, audio protegido, exclusivo o inaccesible pueden no estar disponibles. Si apps comparten un árbol de procesos, se prioriza omitir el árbol que podría contener audio privado. Otra app escribiendo directamente en la salida interna podría introducir audio ajeno; NoEcho comprueba que esté libre al iniciar. Parsec puede volver a Default si desaparece el dispositivo, por lo que debes conservar disponible esa salida. No se afirma integración automática con otros programas remotos.
 

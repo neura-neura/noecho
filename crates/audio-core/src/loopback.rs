@@ -170,7 +170,24 @@ pub fn probe_device_loopback_energy(
 }
 
 pub fn process_loopback_supported() -> bool {
-    os_build_number().map(|b| b >= 20348).unwrap_or(false)
+    // Process loopback is available starting with Windows 10 version 2004.
+    os_build_number().map(process_loopback_build_supported).unwrap_or(false)
+}
+
+#[cfg(test)]
+mod compatibility_tests {
+    #[test]
+    fn windows_10_2004_and_later_builds_are_supported() {
+        assert!(super::process_loopback_build_supported(19041));
+        assert!(super::process_loopback_build_supported(19045));
+        assert!(super::process_loopback_build_supported(22000));
+        assert!(!super::process_loopback_build_supported(19040));
+        assert!(!super::process_loopback_build_supported(18363));
+    }
+}
+
+fn process_loopback_build_supported(build: u32) -> bool {
+    build >= 19041
 }
 
 fn os_build_number() -> Option<u32> {

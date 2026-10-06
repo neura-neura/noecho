@@ -75,7 +75,7 @@ impl ProcessMixer {
     pub fn start(shared: String, settings: MixSettings) -> Result<Self> {
         if !crate::loopback::process_loopback_supported() {
             return Err(AudioError::message(
-                "La captura por proceso requiere Windows build 20348 o posterior (Windows 11).",
+                "La captura por proceso requiere Windows 10 version 2004 (build 19041) o posterior.",
             ));
         }
         let (sender, receiver) = mpsc::channel();
