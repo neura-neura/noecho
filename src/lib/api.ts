@@ -39,6 +39,7 @@ export interface AudioDevice {
 }
 
 export interface ProtectionStatus {
+  integration_pending: boolean;
   remote_capture_ready: boolean;
   remote_backend: "parsec" | "manual";
   active: boolean;

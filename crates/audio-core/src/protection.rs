@@ -44,6 +44,7 @@ pub struct ProtectionStatus {
     pub processor: Option<crate::processor::ProcessorRoute>,
     pub remote_capture_ready: bool,
     pub remote_backend: String,
+    pub integration_pending: bool,
 }
 
 pub struct ProtectionEngine {
@@ -205,7 +206,7 @@ impl ProtectionEngine {
             let remote=crate::parsec::remote_device()?;
             let conflicts=remote_channel_conflicts(&remote,&sessions);
             if !conflicts.is_empty(){return Err(AudioError::message(format!("La salida interna de Parsec está ocupada por: {}. Cierra esa aplicación o cambia su salida.",conflicts.join(", "))));}
-            if !crate::parsec::ready(&remote.id){return Err(AudioError::message("Falta preparar Parsec. Cierra Parsec desde su bandeja y ejecuta el instalador nuevo; NoEcho configurará su captura sin cambiar tu micrófono."));}
+            if !crate::parsec::ready(&remote.id){return Err(AudioError::message("La preparacion de Parsec esta pendiente. NoEcho la aplicara automaticamente cuando Parsec termine de usar su configuracion."));}
             if processor.is_some() {
                 if let Some(u)=&inner.unified{u.update(&config.excluded_apps)?;}
                 else{inner.unified=Some(crate::unified::UnifiedStage::start(&config.excluded_apps)?);}
@@ -453,6 +454,7 @@ fn status(i: &EngineInner) -> ProtectionStatus {
         processor: SessionService::new().list_capture_sessions().ok().and_then(|s| crate::processor::detect(&s).ok().flatten()),
         remote_capture_ready: remote_ready,
         remote_backend: if crate::parsec::installed(){"parsec"}else{"manual"}.into(),
+        integration_pending: dirs::data_local_dir().is_some_and(|p|p.join("NoEcho/parsec-pending").exists() || p.join("NoEcho/pending-integration/engine.exe").exists()),
     }
 }
 fn restore_legacy(s: &IncompleteSession) -> Result<()> {

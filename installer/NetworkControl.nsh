@@ -3,7 +3,9 @@
   ${If} $0 != 0
     MessageBox MB_ICONEXCLAMATION "Windows no permitio configurar el control de NoEcho por la red. Vuelve a instalar y acepta el permiso de administrador."
   ${EndIf}
+  ExecWait '"$INSTDIR\noecho.exe" --start-pending-integration' $0
 !macroend
 !macro NSIS_HOOK_PREUNINSTALL
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "NoEcho"
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "NoEchoPendingIntegration"
 !macroend

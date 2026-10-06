@@ -2,6 +2,7 @@
 
 mod commands;
 mod control;
+mod integration;
 mod state;
 
 use state::AppState;
@@ -13,6 +14,9 @@ use tauri::{
 use tracing_subscriber::EnvFilter;
 
 fn main() {
+    if std::env::args().any(|a|a=="--start-pending-integration"){
+        if let Err(e)=integration::start_pending(){eprintln!("{e}");std::process::exit(1);}return;
+    }
     if std::env::args().any(|a|a=="--setup-network") {
         if let Err(e)=control::setup_network(){eprintln!("{e}");std::process::exit(1);}return;
     }
@@ -35,6 +39,7 @@ fn main() {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
+    if let Err(e)=integration::start_pending(){tracing::warn!("{e}");}
 
     let engine = match audio_core::protection::shared_engine() {
         Ok(e) => e,
