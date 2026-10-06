@@ -131,6 +131,9 @@ fn main() {
                 .build(app)?;
 
             update_tray_tooltip(app.handle());
+            if std::env::args().any(|a|a=="--autostart") {
+                if let Some(window)=app.get_webview_window("main"){window.hide()?;}
+            }
             Ok(())
         })
         .on_window_event(|window, event| {

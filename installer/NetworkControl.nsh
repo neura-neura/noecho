@@ -4,3 +4,6 @@
     MessageBox MB_ICONEXCLAMATION "Windows no permitio configurar el control de NoEcho por la red. Vuelve a instalar y acepta el permiso de administrador."
   ${EndIf}
 !macroend
+!macro NSIS_HOOK_PREUNINSTALL
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "NoEcho"
+!macroend

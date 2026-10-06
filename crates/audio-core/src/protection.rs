@@ -71,6 +71,7 @@ impl ProtectionEngine {
             store.save(&state)?;
         }
         state.config.monitor = "none".into();
+        if state.config.start_with_windows {if let Err(e)=crate::startup::configure(true){warnings.push(e.to_string());}}
         let engine=Self {
             inner: Mutex::new(EngineInner {
                 config: state.config,
@@ -122,13 +123,18 @@ impl ProtectionEngine {
                 "Detén la mezcla antes de cambiar el canal remoto.",
             ));
         }
-        if let Some(m) = &inner.mixer {
-            let mut next=settings(&config);if !inner.enabled{next.excluded.clear();}m.update(next)?;
+        let exclusions_changed=serde_json::to_string(&config.excluded_apps)?!=serde_json::to_string(&inner.config.excluded_apps)?;
+        if exclusions_changed || config.monitor!=inner.config.monitor || config.microphone_to_remote!=inner.config.microphone_to_remote {
+            if let Some(m) = &inner.mixer {
+                let mut next=settings(&config);if !inner.enabled{next.excluded.clear();}m.update(next)?;
+            }
         }
-        if let Some(u) = &inner.unified {
-            u.update(&config.excluded_apps)?;
+        if exclusions_changed {
+            if let Some(u) = &inner.unified {u.update(&config.excluded_apps)?;}
         }
-        persist(&inner.store, &config)?;
+        let startup_changed=config.start_with_windows!=inner.config.start_with_windows;
+        if startup_changed {crate::startup::configure(config.start_with_windows)?;}
+        if let Err(e)=persist(&inner.store, &config){if startup_changed{let _=crate::startup::configure(inner.config.start_with_windows);}return Err(e);}
         inner.config = config;
         Ok(())
     }
@@ -215,6 +221,7 @@ impl ProtectionEngine {
             inner.config = config;
             inner.shared_name = Some(remote.name);
             inner.enabled=true;inner.managed_remote=true;
+            inner.warnings.clear();
             return Ok(status(&inner));
         }
         inner.unified = None;

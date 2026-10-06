@@ -1,4 +1,4 @@
-# NoEcho 0.2.7
+# NoEcho 0.2.8
 
 ## Uso diario
 
@@ -8,9 +8,11 @@
 
 Puedes cambiar la selección mientras NoEcho está activado. No hace falta desmarcar y volver a marcar para aplicar un cambio. Cerrar la ventana conserva NoEcho en la bandeja si está habilitada esa opción.
 
+En **Ajustes → Iniciar con Windows**, puedes hacer que NoEcho se abra en la bandeja al iniciar sesión. Desmarcarlo elimina ese inicio automático. Si se interrumpe la lectura de UnifiedAudio, NoEcho intenta reconectar y reaplicar las apps seleccionadas; los errores de niveles antiguos dejan de mostrarse al cerrar la comprobación de sonido.
+
 ## Instalación para Parsec
 
-Cierra **Parsec**, **UnifiedAudio** y **NoEcho** desde sus bandejas. Ejecuta `NoEcho_0.2.7_un-solo-cable_setup.exe`. Después abre UnifiedAudio, NoEcho y Parsec. NoEcho debe permanecer abierto, aunque sea en la bandeja, para entregar la mezcla a Parsec.
+Cierra **Parsec**, **UnifiedAudio** y **NoEcho** desde sus bandejas. Ejecuta `NoEcho_0.2.8_un-solo-cable_setup.exe`. Después abre UnifiedAudio, NoEcho y Parsec. NoEcho debe permanecer abierto, aunque sea en la bandeja, para entregar la mezcla a Parsec.
 
 Esta integración necesita **Steam Streaming Speakers**, una salida virtual ya instalada en el equipo de desarrollo. El instalador detecta su identificador real y configura Parsec automáticamente para capturarla con su cancelación propia desactivada. No instala Steam ni otro cable. Si esa salida no existe, explica el requisito y no configura Parsec hacia una salida inexistente. Los cambios de Parsec se realizan solo con Parsec cerrado; se guarda `config.json.before-noecho` junto a su configuración.
 
@@ -50,7 +52,7 @@ Los sonidos de Windows sin PID propio, audio protegido, exclusivo o inaccesible 
 
 ## API y comandos del sistema
 
-El control por red está disponible al instalar NoEcho 0.2.7. No requiere clave, SSH ni habilitar un botón. El instalador solicita el permiso de administrador de Windows para crear una regla de firewall que permite TCP 47832 para NoEcho desde la misma subred, en redes físicas o virtuales como ZeroTier. Todos los equipos de esa subred pueden controlar NoEcho. No publiques este puerto en Internet.
+El control por red está disponible al instalar NoEcho 0.2.8. No requiere clave, SSH ni habilitar un botón. El instalador solicita el permiso de administrador de Windows para crear una regla de firewall que permite TCP 47832 para NoEcho desde la misma subred, en redes físicas o virtuales como ZeroTier. Todos los equipos de esa subred pueden controlar NoEcho. No publiques este puerto en Internet.
 
 NoEcho debe permanecer abierto en la PC destino, aunque esté en la bandeja. La API escucha en las direcciones IPv4 de ese equipo y en localhost. En **Ajustes → Control desde otra PC** se muestran las direcciones y puedes copiar los comandos. Si cambia la IP de la red, utiliza la nueva IP.
 

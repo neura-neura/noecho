@@ -66,7 +66,7 @@ export default function App() {
     });
   }
   const visible = groups.filter(g => !g.is_critical && g.exe_name.toLowerCase() !== "noecho.exe" && !(status?.processor && /^unifiedaudio( engine host)?\.exe$/i.test(g.exe_name))).filter(g => (g.display_name + g.exe_name).toLowerCase().includes(search.toLowerCase()));
-  const warnings = [...new Set([...(status?.warnings || []), ...(meters?.errors || [])])];
+  const warnings = [...new Set([...(status?.warnings || []), ...(soundOpen && active ? meters?.errors || [] : [])])];
   const problem = !!error || warnings.some(w => !w.includes("Se restauró la configuración de la versión anterior"));
   const rawProblem = error || warnings.join(" · ");
   const problemDetail = es ? rawProblem : rawProblem
@@ -156,6 +156,8 @@ function Signal({title,value,source,config,active,busy,canListen,detail,onListen
 }
 function Options({config,devices,managedRemote,busy,text,onClose,onPatch,onCopy}:{config:AppConfig|null;devices:AudioDevice[];managedRemote:boolean;busy:boolean;text:(a:string,b:string)=>string;onClose:()=>void;onPatch:(v:Partial<AppConfig>)=>void;onCopy:()=>void}) {
  return <Dialog title={text("Ajustes", "Settings")} onClose={onClose} text={text}>
+ <label className="simple-option"><Checkbox disabled={busy || !config} checked={!!config?.start_with_windows} onCheckedChange={v=>onPatch({start_with_windows:!!v})}/>{text("Iniciar con Windows", "Start with Windows")}</label>
+ <p>{text("Al iniciar sesión, NoEcho se abre en la bandeja.", "At sign-in, NoEcho starts in the system tray.")}</p>
  <RemoteControl text={text}/>
  <label className="simple-field">{text("Idioma", "Language")}<select disabled={busy} value={config?.language||"es"} onChange={e=>onPatch({language:e.target.value as AppConfig["language"]})}><option value="es">Español</option><option value="en">English</option></select></label>
  <label className="simple-field">{text("Colores de la ventana", "Window colors")}<select disabled={busy} value={config?.theme||"system"} onChange={e=>onPatch({theme:e.target.value as AppConfig["theme"]})}><option value="system">{text("Como Windows", "Same as Windows")}</option><option value="light">{text("Claros", "Light")}</option><option value="dark">{text("Oscuros", "Dark")}</option></select></label>

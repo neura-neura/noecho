@@ -13,6 +13,7 @@ pub mod mixer;
 pub mod processor;
 pub mod parsec;
 pub mod unified;
+pub mod startup;
 pub mod cancellation;
 pub mod persist;
 pub mod policy;
